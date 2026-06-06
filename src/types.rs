@@ -23,17 +23,25 @@ pub enum BidiMode {
 }
 
 /// Visual style for a run of text.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TextStyle {
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextStyle<'a> {
     pub font_size: f32,
     pub color: Color,
     pub font_weight: FontWeight,
     pub font_style: FontStyle,
     pub line_height: f32,
     pub bidi_mode: BidiMode,
+    /// Font families to try in order. The first family that provides a matching
+    /// font weight/style is used as the primary; characters missing from it
+    /// fall back to subsequent families.
+    pub font_families: Vec<fontdb::Family<'a>>,
+    /// Exact font keys to try before `font_families`. Each font is used directly
+    /// (no family-name query) and acts as a higher-priority entry in the
+    /// fallback chain. Useful for web fonts loaded via `FontSystem::load_font_data`.
+    pub exact_fonts: Vec<FontKey>,
 }
 
-impl Default for TextStyle {
+impl Default for TextStyle<'_> {
     fn default() -> Self {
         Self {
             font_size: 16.0,
@@ -42,6 +50,12 @@ impl Default for TextStyle {
             font_style: FontStyle::Normal,
             line_height: 1.2,
             bidi_mode: BidiMode::Auto,
+            font_families: vec![
+                fontdb::Family::Serif,
+                fontdb::Family::SansSerif,
+                fontdb::Family::Monospace,
+            ],
+            exact_fonts: Vec::new(),
         }
     }
 }

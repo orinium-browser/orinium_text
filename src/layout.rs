@@ -7,7 +7,7 @@ use unicode_bidi::{BidiInfo, Level};
 use unicode_linebreak::linebreaks;
 
 use crate::FontSystem;
-use crate::types::{BidiMode, FontKey, LayoutGlyph, LayoutLine, TextLayout, TextStyle};
+use crate::types::{BidiMode, FontKey, FontStyle, FontWeight, LayoutGlyph, LayoutLine, TextLayout, TextStyle};
 
 struct GlyphPosition {
     glyph_id: u32,
@@ -97,6 +97,184 @@ fn shape_text(
         .collect()
 }
 
+fn find_font(
+    font_system: &FontSystem,
+    families: &[fontdb::Family],
+    weight: FontWeight,
+    style: FontStyle,
+) -> Option<(FontKey, Vec<u8>)> {
+    if families.is_empty() {
+        return None;
+    }
+    let key = font_system.query(families, weight, style)?;
+    let data = font_system.get_font_data(key)?;
+    Some((key, data.to_vec()))
+}
+
+/// Finds contiguous byte ranges with/without coverage, based on `.notdef` glyphs.
+///
+/// Returns `(start, end, covered)` triples aligned to the glyph cluster
+/// boundaries from `glyphs`.
+fn coverage_ranges(text: &str, glyphs: &[GlyphPosition]) -> Vec<(usize, usize, bool)> {
+    let mut clusters: Vec<(usize, bool)> = glyphs
+        .iter()
+        .map(|g| (g.cluster as usize, g.glyph_id != 0))
+        .collect();
+    clusters.sort_by_key(|(c, _)| *c);
+    clusters.dedup_by_key(|(c, _)| *c);
+
+    if clusters.is_empty() {
+        return vec![(0, text.len(), false)];
+    }
+
+    let mut ranges = Vec::new();
+    let mut start = clusters[0].0;
+    let mut covered = clusters[0].1;
+
+    for &(cluster, is_covered) in &clusters[1..] {
+        if is_covered != covered {
+            ranges.push((start, cluster, covered));
+            start = cluster;
+            covered = is_covered;
+        }
+    }
+    ranges.push((start, text.len(), covered));
+    ranges
+}
+
+/// Shapes `text` with the given font, splitting on `.notdef` if needed.
+///
+/// `try_next` is called for any byte-range where the font produced `.notdef`
+/// glyphs, allowing the caller to supply a fallback font.
+fn shape_with_font(
+    text: &str,
+    run_start: usize,
+    font_key: FontKey,
+    font_data: &[u8],
+    font_system: &mut FontSystem,
+    font_size: f32,
+    try_next: &mut dyn FnMut(&str, usize, &mut FontSystem) -> Vec<ShapedRun>,
+    direction: Direction,
+) -> Vec<ShapedRun> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let mut glyphs = shape_text(font_data, 0, text, font_size, direction);
+    for g in &mut glyphs {
+        g.cluster += run_start as u32;
+    }
+
+    let has_notdef = glyphs.iter().any(|g| g.glyph_id == 0);
+
+    if !has_notdef {
+        return vec![ShapedRun {
+            glyphs,
+            font_key,
+            font_data: font_data.to_vec(),
+            direction,
+        }];
+    }
+
+    let ranges = coverage_ranges(text, &glyphs);
+    let mut result = Vec::new();
+
+    for (start, end, covered) in ranges {
+        if start >= end {
+            continue;
+        }
+        let sub_text = &text[start..end];
+        if covered {
+            let sub_glyphs = shape_text(font_data, 0, sub_text, font_size, direction);
+            let mut adjusted = sub_glyphs;
+            for g in &mut adjusted {
+                g.cluster += (run_start + start) as u32;
+            }
+            result.push(ShapedRun {
+                glyphs: adjusted,
+                font_key,
+                font_data: font_data.to_vec(),
+                direction,
+            });
+        } else {
+            let fallback = try_next(sub_text, run_start + start, font_system);
+            result.extend(fallback);
+        }
+    }
+
+    result
+}
+
+/// Shapes `text` through the full fallback chain: first try each
+/// `exact_fonts` (direct `FontKey` lookup), then each `font_families`
+/// (name-query), splitting on `.notdef` at every level.
+fn shape_with_fallback(
+    text: &str,
+    run_start: usize,
+    font_system: &mut FontSystem,
+    weight: FontWeight,
+    style: FontStyle,
+    font_size: f32,
+    exact_fonts: &[FontKey],
+    families: &[fontdb::Family],
+    direction: Direction,
+) -> Vec<ShapedRun> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    // Phase 1: try exact fonts by FontKey (no family-name query)
+    if !exact_fonts.is_empty() {
+        let font_key = exact_fonts[0];
+        let font_data = match font_system.get_font_data(font_key) {
+            Some(d) => d.to_vec(),
+            None => {
+                return shape_with_fallback(
+                    text, run_start, font_system, weight, style, font_size,
+                    &exact_fonts[1..], families, direction,
+                );
+            }
+        };
+
+        return shape_with_font(
+            text, run_start, font_key, &font_data, font_system, font_size,
+            &mut |sub, offset, fs| {
+                shape_with_fallback(
+                    sub, offset, fs, weight, style, font_size,
+                    &exact_fonts[1..], families, direction,
+                )
+            },
+            direction,
+        );
+    }
+
+    // Phase 2: try font families (query by name)
+    if families.is_empty() {
+        return Vec::new();
+    }
+
+    let (font_key, font_data) = match find_font(font_system, &families[..1], weight, style) {
+        Some(kd) => kd,
+        None => {
+            return shape_with_fallback(
+                text, run_start, font_system, weight, style, font_size,
+                exact_fonts, &families[1..], direction,
+            );
+        }
+    };
+
+    shape_with_font(
+        text, run_start, font_key, &font_data, font_system, font_size,
+        &mut |sub, offset, fs| {
+            shape_with_fallback(
+                sub, offset, fs, weight, style, font_size,
+                exact_fonts, &families[1..], direction,
+            )
+        },
+        direction,
+    )
+}
+
 struct GlyphCacheEntry {
     rasterized: RasterizedGlyph,
 }
@@ -154,53 +332,16 @@ impl TextLayouter {
         &mut self,
         font_system: &mut FontSystem,
         text: &str,
-        style: &TextStyle,
+        style: &TextStyle<'_>,
         max_width: Option<f32>,
     ) -> TextLayout {
-        if text.is_empty() {
+        if text.is_empty() || font_system.font_data.is_empty() {
             return TextLayout {
                 lines: Vec::new(),
                 width: 0.0,
                 height: 0.0,
             };
         }
-
-        let font_key = font_system.query(
-            &[
-                fontdb::Family::Serif,
-                fontdb::Family::SansSerif,
-                fontdb::Family::Monospace,
-            ],
-            style.font_weight,
-            style.font_style,
-        );
-        let font_key = match font_key {
-            Some(k) => k,
-            None => {
-                let first_id = font_system.font_data.keys().next().copied().map(FontKey);
-                match first_id {
-                    Some(k) => k,
-                    None => {
-                        return TextLayout {
-                            lines: Vec::new(),
-                            width: 0.0,
-                            height: 0.0,
-                        };
-                    }
-                }
-            }
-        };
-
-        let font_data = match font_system.get_font_data(font_key) {
-            Some(d) => d.to_vec(),
-            None => {
-                return TextLayout {
-                    lines: Vec::new(),
-                    width: 0.0,
-                    height: 0.0,
-                };
-            }
-        };
 
         let bidi_level = match style.bidi_mode {
             BidiMode::Auto => None,
@@ -244,22 +385,26 @@ impl TextLayouter {
                 Direction::Ltr
             };
 
-            let runs = build_visual_runs(para_text, base_direction, &levels, font_key, &font_data);
+            let runs = build_visual_runs(para_text, base_direction, &levels);
 
             let mut shaped_runs: Vec<(ShapedRun, Direction)> = Vec::new();
             for run in &runs {
                 let run_text = &para_text[run.start..run.end];
-                let glyphs =
-                    shape_text(&run.font_data, 0, run_text, style.font_size, run.direction);
-                shaped_runs.push((
-                    ShapedRun {
-                        glyphs,
-                        font_key: run.font_key,
-                        font_data: run.font_data.clone(),
-                        direction: run.direction,
-                    },
+                let fallback_runs = shape_with_fallback(
+                    run_text,
+                    run.start,
+                    font_system,
+                    style.font_weight,
+                    style.font_style,
+                    style.font_size,
+                    &style.exact_fonts,
+                    &style.font_families,
                     run.direction,
-                ));
+                );
+                for sr in fallback_runs {
+                    let dir = sr.direction;
+                    shaped_runs.push((sr, dir));
+                }
             }
 
             let mut break_ops: Vec<usize> = linebreaks(para_text).map(|(pos, _)| pos).collect();
@@ -402,8 +547,6 @@ struct VisualRun {
     start: usize,
     end: usize,
     direction: Direction,
-    font_key: FontKey,
-    font_data: Vec<u8>,
 }
 
 /// Splits a paragraph into visual runs based on bidi levels.
@@ -414,8 +557,6 @@ fn build_visual_runs(
     text: &str,
     base_direction: Direction,
     levels: &[u8],
-    font_key: FontKey,
-    font_data: &[u8],
 ) -> Vec<VisualRun> {
     if text.is_empty() {
         return Vec::new();
@@ -442,8 +583,6 @@ fn build_visual_runs(
                 start: run_start,
                 end: i,
                 direction: current_dir,
-                font_key,
-                font_data: font_data.to_vec(),
             });
             run_start = i;
             current_dir = dir;
@@ -455,8 +594,6 @@ fn build_visual_runs(
             start: run_start,
             end: text.len(),
             direction: current_dir,
-            font_key,
-            font_data: font_data.to_vec(),
         });
     }
 
