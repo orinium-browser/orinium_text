@@ -2,5 +2,12 @@
 name = "orinium_text"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
+unicode-bidi = "0.3"
+unicode-linebreak = "0.1"
+
+rustybuzz = "0.20"
+fontdue = "0.9"
+fontdb = "0.23"
