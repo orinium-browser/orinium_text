@@ -14,6 +14,14 @@ pub enum FontStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FontWeight(pub u16);
 
+/// Controls how the bidirectional text algorithm determines the base paragraph direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BidiMode {
+    Auto,
+    Ltr,
+    Rtl,
+}
+
 /// Visual style for a run of text.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextStyle {
@@ -22,6 +30,7 @@ pub struct TextStyle {
     pub font_weight: FontWeight,
     pub font_style: FontStyle,
     pub line_height: f32,
+    pub bidi_mode: BidiMode,
 }
 
 impl Default for TextStyle {
@@ -32,6 +41,7 @@ impl Default for TextStyle {
             font_weight: FontWeight(400),
             font_style: FontStyle::Normal,
             line_height: 1.2,
+            bidi_mode: BidiMode::Auto,
         }
     }
 }
