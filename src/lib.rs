@@ -4,7 +4,9 @@
 //! powered by [rustybuzz], [fontdue], and [fontdb].
 
 pub mod font_system;
+pub mod layout;
 pub mod types;
 
 pub use font_system::FontSystem;
+pub use layout::TextLayouter;
 pub use types::*;
