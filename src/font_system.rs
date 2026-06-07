@@ -60,7 +60,17 @@ impl FontSystem {
     }
 
     /// Returns the raw font data for a given key.
-    pub fn get_font_data(&self, key: FontKey) -> Option<&[u8]> {
+    ///
+    /// Data is loaded lazily from fontdb sources (file or binary) on first
+    /// access and cached in memory for subsequent calls.
+    pub fn get_font_data(&mut self, key: FontKey) -> Option<&[u8]> {
+        if self.font_data.contains_key(&key.0) {
+            return Some(self.font_data.get(&key.0).unwrap().as_slice());
+        }
+        let data = self
+            .db
+            .with_face_data(key.0, |font_data, _| font_data.to_vec())?;
+        self.font_data.insert(key.0, data);
         self.font_data.get(&key.0).map(|v| v.as_slice())
     }
 }
