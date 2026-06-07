@@ -164,16 +164,16 @@ fn shape_with_font(
         return Vec::new();
     }
 
-    let mut glyphs = shape_text(font_data, 0, text, font_size, direction);
-    for g in &mut glyphs {
-        g.cluster += run_start as u32;
-    }
-
+    let glyphs = shape_text(font_data, 0, text, font_size, direction);
     let has_notdef = glyphs.iter().any(|g| g.glyph_id == 0);
 
     if !has_notdef {
+        let mut adjusted = glyphs;
+        for g in &mut adjusted {
+            g.cluster += run_start as u32;
+        }
         return vec![ShapedRun {
-            glyphs,
+            glyphs: adjusted,
             font_key,
             font_data: font_data.to_vec(),
             direction,
