@@ -80,3 +80,22 @@ impl Default for FontSystem {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_creates_non_empty_db() {
+        let fs = FontSystem::new();
+        assert!(fs.db.len() > 0, "expected at least one system font");
+    }
+
+    #[test]
+    fn test_default_equals_new() {
+        let a = FontSystem::new();
+        let b = FontSystem::default();
+        assert!(a.db.len() > 0);
+        assert_eq!(a.db.len(), b.db.len());
+    }
+}
