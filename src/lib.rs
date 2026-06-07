@@ -8,5 +8,8 @@ pub mod layout;
 pub mod types;
 
 pub use font_system::FontSystem;
-pub use layout::TextLayouter;
+pub use layout::{Fragment, ShapedText, TextLayouter};
 pub use types::*;
+
+// Re-exported so integration tests can construct TextStyle fields.
+pub use fontdb;
