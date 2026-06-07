@@ -1,7 +1,36 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use fontdue::{Font, FontSettings};
+use rustybuzz::Face;
+
+use crate::layout::RasterizedGlyph;
 use crate::types::{FontKey, FontStyle, FontWeight};
+
+/// Keeps font bytes alive while caching a parsed `rustybuzz::Face`.
+///
+/// `Face` borrows the underlying font data. This struct bundles them
+/// together so that when the struct moves (e.g. inside a `HashMap`) the
+/// heap‑allocated byte buffer stays at the same address.
+struct CachedFace {
+    _data: Vec<u8>,
+    face: Face<'static>,
+}
+
+impl CachedFace {
+    fn new(data: Vec<u8>, index: u32) -> Option<Self> {
+        let face = Face::from_slice(&data, index)?;
+        // Safety: `face` borrows from `data`, which is moved into the same
+        // struct.  The `Vec`'s heap buffer address is stable across moves,
+        // so the reference remains valid for as long as `CachedFace` lives.
+        let face = unsafe { std::mem::transmute::<Face<'_>, Face<'static>>(face) };
+        Some(CachedFace { _data: data, face })
+    }
+
+    fn face(&self) -> &Face<'_> {
+        &self.face
+    }
+}
 
 /// Manages font discovery, loading, and data storage.
 ///
@@ -10,6 +39,9 @@ use crate::types::{FontKey, FontStyle, FontWeight};
 pub struct FontSystem {
     pub(crate) db: fontdb::Database,
     pub(crate) font_data: HashMap<fontdb::ID, Vec<u8>>,
+    pub(crate) parsed_fonts: HashMap<fontdb::ID, Font>,
+    rasterized: HashMap<(fontdb::ID, u32, u32), RasterizedGlyph>,
+    face_cache: HashMap<fontdb::ID, CachedFace>,
 }
 
 impl FontSystem {
@@ -20,6 +52,9 @@ impl FontSystem {
         Self {
             db,
             font_data: HashMap::new(),
+            parsed_fonts: HashMap::new(),
+            rasterized: HashMap::new(),
+            face_cache: HashMap::new(),
         }
     }
 
@@ -37,7 +72,64 @@ impl FontSystem {
                 font_data.insert(id, data.clone());
             }
         }
-        Self { db, font_data }
+        Self {
+            db,
+            font_data,
+            parsed_fonts: HashMap::new(),
+            rasterized: HashMap::new(),
+            face_cache: HashMap::new(),
+        }
+    }
+
+    /// Returns a parsed [`Font`] for the given `font_key`, parsing and caching
+    /// the font on first access. The parsed font is reused across all subsequent
+    /// calls, avoiding repeated parsing of the same font file.
+    pub fn get_or_parse_font(&mut self, font_key: FontKey) -> Option<&Font> {
+        if self.parsed_fonts.contains_key(&font_key.0) {
+            return Some(&self.parsed_fonts[&font_key.0]);
+        }
+        let data = self.get_font_data(font_key)?.to_vec();
+        let font = Font::from_bytes(data, FontSettings::default()).ok()?;
+        self.parsed_fonts.insert(font_key.0, font);
+        Some(&self.parsed_fonts[&font_key.0])
+    }
+
+    /// Returns rasterized metrics for the given glyph, caching the result so
+    /// the same glyph at the same font size is never rasterized twice.
+    /// The font is looked up internally via [`get_or_parse_font`].
+    pub(crate) fn get_or_rasterize(
+        &mut self,
+        font_key: FontKey,
+        glyph_id: u32,
+        font_size: f32,
+    ) -> Option<&RasterizedGlyph> {
+        let size_bits = font_size.to_bits();
+        let key = (font_key.0, glyph_id, size_bits);
+        if self.rasterized.contains_key(&key) {
+            return Some(&self.rasterized[&key]);
+        }
+        let font = self.get_or_parse_font(font_key)?;
+        let (metrics, _bitmap) = font.rasterize_indexed(glyph_id as u16, font_size);
+        let rasterized = RasterizedGlyph {
+            width: metrics.width as u32,
+            height: metrics.height as u32,
+            bearing_x: metrics.xmin,
+            bearing_y: metrics.ymin,
+        };
+        self.rasterized.insert(key, rasterized);
+        Some(&self.rasterized[&key])
+    }
+
+    /// Returns a cached `rustybuzz::Face` for the given font, creating and
+    /// caching it on first access. The face is reused across all subsequent
+    /// calls, avoiding repeated parsing of the font file tables.
+    pub(crate) fn get_or_create_face(&mut self, key: FontKey) -> Option<&Face<'_>> {
+        if !self.face_cache.contains_key(&key.0) {
+            let data = self.get_font_data(key)?.to_vec();
+            let cached = CachedFace::new(data, 0)?;
+            self.face_cache.insert(key.0, cached);
+        }
+        Some(self.face_cache[&key.0].face())
     }
 
     /// Loads a font from raw byte data and returns the assigned keys.

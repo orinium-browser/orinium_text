@@ -1,7 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use fontdue::{Font, FontSettings};
 use rustybuzz::{Direction as RbDirection, Face, UnicodeBuffer};
 use unicode_bidi::{BidiInfo, Level};
 use unicode_linebreak::linebreaks;
@@ -25,7 +21,6 @@ struct GlyphPosition {
 pub(crate) struct ShapedRun {
     glyphs: Vec<GlyphPosition>,
     font_key: FontKey,
-    font_data: Vec<u8>,
     direction: Direction,
 }
 
@@ -41,36 +36,19 @@ impl Direction {
     }
 }
 
-struct RasterizedGlyph {
-    width: u32,
-    height: u32,
-    bearing_x: i32,
-    bearing_y: i32,
-}
-
-fn rasterize(font_data: &[u8], glyph_index: u16, font_size: f32) -> Option<RasterizedGlyph> {
-    let font = Font::from_bytes(font_data, FontSettings::default()).ok()?;
-    let (metrics, _bitmap) = font.rasterize_indexed(glyph_index, font_size);
-    Some(RasterizedGlyph {
-        width: metrics.width as u32,
-        height: metrics.height as u32,
-        bearing_x: metrics.xmin,
-        bearing_y: metrics.ymin,
-    })
+pub(crate) struct RasterizedGlyph {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) bearing_x: i32,
+    pub(crate) bearing_y: i32,
 }
 
 fn shape_text(
-    font_data: &[u8],
-    face_index: u32,
+    face: &Face,
     text: &str,
     font_size: f32,
     direction: Direction,
 ) -> Vec<GlyphPosition> {
-    let face = match Face::from_slice(font_data, face_index) {
-        Some(face) => face,
-        None => return Vec::new(),
-    };
-
     let upem = face.units_per_em() as f32;
     let scale = font_size / upem;
 
@@ -106,13 +84,13 @@ fn find_font(
     families: &[fontdb::Family],
     weight: FontWeight,
     style: FontStyle,
-) -> Option<(FontKey, Vec<u8>)> {
+) -> Option<FontKey> {
     if families.is_empty() {
         return None;
     }
     let key = font_system.query(families, weight, style)?;
-    let data = font_system.get_font_data(key)?;
-    Some((key, data.to_vec()))
+    font_system.get_font_data(key)?;
+    Some(key)
 }
 
 /// Finds contiguous byte ranges with/without coverage, based on `.notdef` glyphs.
@@ -154,7 +132,6 @@ fn shape_with_font(
     text: &str,
     run_start: usize,
     font_key: FontKey,
-    font_data: &[u8],
     font_system: &mut FontSystem,
     font_size: f32,
     try_next: &mut dyn FnMut(&str, usize, &mut FontSystem) -> Vec<ShapedRun>,
@@ -164,7 +141,12 @@ fn shape_with_font(
         return Vec::new();
     }
 
-    let glyphs = shape_text(font_data, 0, text, font_size, direction);
+    // Scoped so the `face` borrow from font_system is released before
+    // any `try_next` call (which also needs font_system).
+    let glyphs = match font_system.get_or_create_face(font_key) {
+        Some(face) => shape_text(face, text, font_size, direction),
+        None => return Vec::new(),
+    };
     let has_notdef = glyphs.iter().any(|g| g.glyph_id == 0);
 
     if !has_notdef {
@@ -175,7 +157,6 @@ fn shape_with_font(
         return vec![ShapedRun {
             glyphs: adjusted,
             font_key,
-            font_data: font_data.to_vec(),
             direction,
         }];
     }
@@ -189,7 +170,12 @@ fn shape_with_font(
         }
         let sub_text = &text[start..end];
         if covered {
-            let sub_glyphs = shape_text(font_data, 0, sub_text, font_size, direction);
+            // Re-acquire face from cache; the initial borrow was released above.
+            let face = match font_system.get_or_create_face(font_key) {
+                Some(f) => f,
+                None => continue,
+            };
+            let sub_glyphs = shape_text(face, sub_text, font_size, direction);
             let mut adjusted = sub_glyphs;
             for g in &mut adjusted {
                 g.cluster += (run_start + start) as u32;
@@ -197,7 +183,6 @@ fn shape_with_font(
             result.push(ShapedRun {
                 glyphs: adjusted,
                 font_key,
-                font_data: font_data.to_vec(),
                 direction,
             });
         } else {
@@ -230,28 +215,24 @@ fn shape_with_fallback(
     // Phase 1: try exact fonts by FontKey (no family-name query)
     if !exact_fonts.is_empty() {
         let font_key = exact_fonts[0];
-        let font_data = match font_system.get_font_data(font_key) {
-            Some(d) => d.to_vec(),
-            None => {
-                return shape_with_fallback(
-                    text,
-                    run_start,
-                    font_system,
-                    weight,
-                    style,
-                    font_size,
-                    &exact_fonts[1..],
-                    families,
-                    direction,
-                );
-            }
-        };
+        if font_system.get_font_data(font_key).is_none() {
+            return shape_with_fallback(
+                text,
+                run_start,
+                font_system,
+                weight,
+                style,
+                font_size,
+                &exact_fonts[1..],
+                families,
+                direction,
+            );
+        }
 
         return shape_with_font(
             text,
             run_start,
             font_key,
-            &font_data,
             font_system,
             font_size,
             &mut |sub, offset, fs| {
@@ -276,8 +257,8 @@ fn shape_with_fallback(
         return Vec::new();
     }
 
-    let (font_key, font_data) = match find_font(font_system, &families[..1], weight, style) {
-        Some(kd) => kd,
+    let font_key = match find_font(font_system, &families[..1], weight, style) {
+        Some(key) => key,
         None => {
             return shape_with_fallback(
                 text,
@@ -297,7 +278,6 @@ fn shape_with_fallback(
         text,
         run_start,
         font_key,
-        &font_data,
         font_system,
         font_size,
         &mut |sub, offset, fs| {
@@ -315,37 +295,6 @@ fn shape_with_fallback(
         },
         direction,
     )
-}
-
-struct GlyphCacheEntry {
-    rasterized: RasterizedGlyph,
-}
-
-/// Cache keyed by `(FontKey, glyph_id, font_size_bits)`. Holds [`Arc`] so that
-/// the same rasterized glyph can be shared across lines without copying pixels.
-#[derive(Default)]
-struct GlyphCache {
-    entries: HashMap<(FontKey, u32, u32), Arc<GlyphCacheEntry>>,
-}
-
-impl GlyphCache {
-    fn get_or_rasterize(
-        &mut self,
-        font_key: FontKey,
-        font_data: &[u8],
-        glyph_id: u32,
-        font_size: f32,
-    ) -> Option<Arc<GlyphCacheEntry>> {
-        let size_bits = font_size.to_bits();
-        let key = (font_key, glyph_id, size_bits);
-        if let Some(entry) = self.entries.get(&key) {
-            return Some(Arc::clone(entry));
-        }
-        let rasterized = rasterize(font_data, glyph_id as u16, font_size)?;
-        let entry = Arc::new(GlyphCacheEntry { rasterized });
-        self.entries.insert(key, Arc::clone(&entry));
-        Some(entry)
-    }
 }
 
 /// A single layout fragment — the atomic unit the external layout engine
@@ -390,16 +339,12 @@ pub(crate) struct ParaShapedData {
 /// Combines font matching, bidirectional text resolution, Unicode line breaking,
 /// shaping via rustybuzz, and glyph rasterization via fontdue into a single
 /// `layout_text` call.
-pub struct TextLayouter {
-    glyph_cache: GlyphCache,
-}
+pub struct TextLayouter;
 
 impl TextLayouter {
-    /// Creates a new `TextLayouter` with an empty glyph cache.
+    /// Creates a new `TextLayouter`.
     pub fn new() -> Self {
-        Self {
-            glyph_cache: GlyphCache::default(),
-        }
+        Self
     }
 
     /// Shapes the text without line-breaking or glyph positioning.
@@ -528,6 +473,7 @@ impl TextLayouter {
     /// text, typically produced by an external layout engine.
     pub fn layout_lines(
         &mut self,
+        font_system: &mut FontSystem,
         shaped: &ShapedText,
         line_ranges: &[(usize, usize)],
         style: &TextStyle<'_>,
@@ -550,10 +496,28 @@ impl TextLayouter {
             let para = match shaped
                 .paras
                 .iter()
-                .find(|p| p.offset <= line_start && line_start < p.offset + p.len)
+                .find(|p| {
+                    p.offset <= line_start
+                        && (if p.len == 0 {
+                            p.offset == line_start
+                        } else {
+                            line_start < p.offset + p.len
+                        })
+                })
             {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    all_lines.push(LayoutLine {
+                        glyphs: Vec::new(),
+                        x: 0.0,
+                        y: current_y,
+                        width: 0.0,
+                        height: line_height,
+                        baseline: 0.0,
+                    });
+                    current_y += line_height;
+                    continue;
+                }
             };
 
             // Filter glyphs for this line range
@@ -587,7 +551,6 @@ impl TextLayouter {
                                 cluster: g.cluster,
                             }],
                             font_key: run.font_key,
-                            font_data: run.font_data.clone(),
                             direction: *dir,
                         });
                     }
@@ -602,19 +565,13 @@ impl TextLayouter {
 
             for run in &line_glyphs {
                 for g in &run.glyphs {
-                    let cache_entry = self.glyph_cache.get_or_rasterize(
+                    let rasterized = font_system.get_or_rasterize(
                         run.font_key,
-                        &run.font_data,
                         g.glyph_id,
                         style.font_size,
                     );
-                    let (w, h, bx, by) = match cache_entry {
-                        Some(ref entry) => (
-                            entry.rasterized.width as f32,
-                            entry.rasterized.height as f32,
-                            entry.rasterized.bearing_x as f32,
-                            entry.rasterized.bearing_y as f32,
-                        ),
+                    let (w, h, bx, by) = match rasterized {
+                        Some(r) => (r.width as f32, r.height as f32, r.bearing_x as f32, r.bearing_y as f32),
                         None => (0.0, 0.0, 0.0, 0.0),
                     };
 
@@ -690,7 +647,7 @@ impl TextLayouter {
         let shaped = self.shape_text(font_system, text, style);
         let wrap_width = max_width.unwrap_or(f32::MAX);
         let line_ranges = build_line_ranges(text.len(), &shaped.fragments, wrap_width);
-        self.layout_lines(&shaped, &line_ranges, style)
+        self.layout_lines(font_system, &shaped, &line_ranges, style)
     }
 }
 
@@ -763,6 +720,9 @@ fn build_line_ranges(
     fragments: &[Fragment],
     max_width: f32,
 ) -> Vec<(usize, usize)> {
+    if text_len == 0 {
+        return Vec::new();
+    }
     if fragments.is_empty() {
         return vec![(0, text_len)];
     }
@@ -782,11 +742,13 @@ fn build_line_ranges(
 
         if line_width > max_width {
             let break_at = last_break.unwrap_or(frag.cluster);
-            lines.push((line_start, break_at));
+            if break_at > line_start {
+                lines.push((line_start, break_at));
+            }
             line_start = break_at;
             line_width = 0.0;
             last_break = None;
-            if break_at < frag.cluster {
+            if break_at <= frag.cluster {
                 line_width = frag.width;
             }
         }
