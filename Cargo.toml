@@ -13,5 +13,5 @@ fontdue = "0.9"
 rustybuzz = "0.20"
 
 [features]
-default = []
+default = ["layout-text"]
 layout-text = []
