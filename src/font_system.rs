@@ -23,6 +23,23 @@ impl FontSystem {
         }
     }
 
+    /// Creates a `FontSystem` with only the specified font data (no system fonts).
+    ///
+    /// Each element of `fonts_data` is a `Vec<u8>` of raw font file bytes (e.g., TTF, OTF).
+    /// The data is cloned and stored internally.
+    pub fn new_with_fonts(fonts_data: Vec<Vec<u8>>) -> Self {
+        let mut db = fontdb::Database::new();
+        let mut font_data = HashMap::new();
+        for data in fonts_data {
+            let source = fontdb::Source::Binary(Arc::new(data.clone()));
+            let ids = db.load_font_source(source);
+            for id in ids {
+                font_data.insert(id, data.clone());
+            }
+        }
+        Self { db, font_data }
+    }
+
     /// Loads a font from raw byte data and returns the assigned keys.
     ///
     /// The data is cloned and stored internally so it remains available for
@@ -57,6 +74,11 @@ impl FontSystem {
         };
         let id = self.db.query(&query)?;
         Some(FontKey(id))
+    }
+
+    /// Returns the keys of all currently loaded fonts.
+    pub fn font_keys(&self) -> Vec<FontKey> {
+        self.font_data.keys().copied().map(FontKey).collect()
     }
 
     /// Returns the raw font data for a given key.
