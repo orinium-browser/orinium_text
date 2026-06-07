@@ -7,8 +7,11 @@ use unicode_bidi::{BidiInfo, Level};
 use unicode_linebreak::linebreaks;
 
 use crate::FontSystem;
-use crate::types::{BidiMode, FontKey, FontStyle, FontWeight, LayoutGlyph, LayoutLine, TextLayout, TextStyle};
+use crate::types::{
+    BidiMode, FontKey, FontStyle, FontWeight, LayoutGlyph, LayoutLine, TextLayout, TextStyle,
+};
 
+#[derive(Debug, Clone)]
 struct GlyphPosition {
     glyph_id: u32,
     x_advance: f32,
@@ -18,7 +21,8 @@ struct GlyphPosition {
     cluster: u32,
 }
 
-struct ShapedRun {
+#[derive(Debug, Clone)]
+pub(crate) struct ShapedRun {
     glyphs: Vec<GlyphPosition>,
     font_key: FontKey,
     font_data: Vec<u8>,
@@ -26,7 +30,7 @@ struct ShapedRun {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Direction {
+pub(crate) enum Direction {
     Ltr,
     Rtl,
 }
@@ -68,7 +72,7 @@ fn shape_text(
     };
 
     let upem = face.units_per_em() as f32;
-    let scale = font_size / upem / 64.0;
+    let scale = font_size / upem;
 
     let rb_direction = match direction {
         Direction::Ltr => RbDirection::LeftToRight,
@@ -98,7 +102,7 @@ fn shape_text(
 }
 
 fn find_font(
-    font_system: &FontSystem,
+    font_system: &mut FontSystem,
     families: &[fontdb::Family],
     weight: FontWeight,
     style: FontStyle,
@@ -230,18 +234,37 @@ fn shape_with_fallback(
             Some(d) => d.to_vec(),
             None => {
                 return shape_with_fallback(
-                    text, run_start, font_system, weight, style, font_size,
-                    &exact_fonts[1..], families, direction,
+                    text,
+                    run_start,
+                    font_system,
+                    weight,
+                    style,
+                    font_size,
+                    &exact_fonts[1..],
+                    families,
+                    direction,
                 );
             }
         };
 
         return shape_with_font(
-            text, run_start, font_key, &font_data, font_system, font_size,
+            text,
+            run_start,
+            font_key,
+            &font_data,
+            font_system,
+            font_size,
             &mut |sub, offset, fs| {
                 shape_with_fallback(
-                    sub, offset, fs, weight, style, font_size,
-                    &exact_fonts[1..], families, direction,
+                    sub,
+                    offset,
+                    fs,
+                    weight,
+                    style,
+                    font_size,
+                    &exact_fonts[1..],
+                    families,
+                    direction,
                 )
             },
             direction,
@@ -257,18 +280,37 @@ fn shape_with_fallback(
         Some(kd) => kd,
         None => {
             return shape_with_fallback(
-                text, run_start, font_system, weight, style, font_size,
-                exact_fonts, &families[1..], direction,
+                text,
+                run_start,
+                font_system,
+                weight,
+                style,
+                font_size,
+                exact_fonts,
+                &families[1..],
+                direction,
             );
         }
     };
 
     shape_with_font(
-        text, run_start, font_key, &font_data, font_system, font_size,
+        text,
+        run_start,
+        font_key,
+        &font_data,
+        font_system,
+        font_size,
         &mut |sub, offset, fs| {
             shape_with_fallback(
-                sub, offset, fs, weight, style, font_size,
-                exact_fonts, &families[1..], direction,
+                sub,
+                offset,
+                fs,
+                weight,
+                style,
+                font_size,
+                exact_fonts,
+                &families[1..],
+                direction,
             )
         },
         direction,
@@ -306,6 +348,43 @@ impl GlyphCache {
     }
 }
 
+/// A single layout fragment — the atomic unit the external layout engine
+/// works with. Each fragment corresponds to one glyph cluster and carries
+/// its size and line-break eligibility.
+#[derive(Debug, Clone)]
+pub struct Fragment {
+    /// Byte offset of this fragment's first character in the original text.
+    pub cluster: usize,
+    /// X position in a single-line (unwrapped) layout.
+    pub x: f32,
+    /// Advance width of this fragment in pixels.
+    pub width: f32,
+    /// Whether a line break is permitted immediately after this fragment.
+    pub break_after: bool,
+}
+
+/// The result of shaping text without line-breaking or glyph positioning.
+///
+/// An external layout engine iterates [`fragments`](ShapedText::fragments),
+/// accumulates [`Fragment::width`] values, and decides where to break
+/// (respecting [`Fragment::break_after`]).  The resulting byte ranges are
+/// passed to [`TextLayouter::layout_lines`].
+#[derive(Debug, Clone)]
+pub struct ShapedText {
+    /// Flat list of fragments in visual order.
+    pub fragments: Vec<Fragment>,
+    /// Per-paragraph internal shape data (used by `layout_lines`).
+    pub(crate) paras: Vec<ParaShapedData>,
+}
+
+/// Per-paragraph internal shaping data for line positioning.
+#[derive(Debug, Clone)]
+pub(crate) struct ParaShapedData {
+    pub(crate) offset: usize,
+    pub(crate) len: usize,
+    pub(crate) shaped_runs: Vec<(ShapedRun, Direction)>,
+}
+
 /// Lays out text into positioned glyph runs.
 ///
 /// Combines font matching, bidirectional text resolution, Unicode line breaking,
@@ -323,23 +402,20 @@ impl TextLayouter {
         }
     }
 
-    /// Produces a fully laid-out `TextLayout` for the given text.
+    /// Shapes the text without line-breaking or glyph positioning.
     ///
-    /// Internally runs bidi resolution, line breaking, shaping, and
-    /// rasterization. Glyph bitmaps are cached across calls to avoid
-    /// re-rasterizing identical characters at the same size.
-    pub fn layout_text(
+    /// Returns a [`ShapedText`] containing glyph runs and break opportunities
+    /// that an external layout engine can use to determine line breaks.
+    pub fn shape_text(
         &mut self,
         font_system: &mut FontSystem,
         text: &str,
         style: &TextStyle<'_>,
-        max_width: Option<f32>,
-    ) -> TextLayout {
-        if text.is_empty() || font_system.font_data.is_empty() {
-            return TextLayout {
-                lines: Vec::new(),
-                width: 0.0,
-                height: 0.0,
+    ) -> ShapedText {
+        if text.is_empty() || font_system.db.len() == 0 {
+            return ShapedText {
+                fragments: Vec::new(),
+                paras: Vec::new(),
             };
         }
 
@@ -349,10 +425,9 @@ impl TextLayouter {
             BidiMode::Rtl => Some(Level::rtl()),
         };
         let bidi_info = BidiInfo::new(text, bidi_level);
-        let line_height = style.font_size * style.line_height;
-        let mut all_lines: Vec<LayoutLine> = Vec::new();
-        let mut current_y = 0.0_f32;
-        let mut max_line_width = 0.0_f32;
+
+        let mut all_fragments: Vec<Fragment> = Vec::new();
+        let mut paras: Vec<ParaShapedData> = Vec::new();
 
         for para_idx in 0..bidi_info.paragraphs.len() {
             let (para_range, para_level) = match bidi_info.paragraphs.get(para_idx) {
@@ -363,15 +438,11 @@ impl TextLayouter {
             let para_text = &text[para_range.clone()];
 
             if para_text.is_empty() {
-                all_lines.push(LayoutLine {
-                    glyphs: Vec::new(),
-                    x: 0.0,
-                    y: current_y,
-                    width: 0.0,
-                    height: line_height,
-                    baseline: style.font_size * 0.8,
+                paras.push(ParaShapedData {
+                    offset: para_range.start,
+                    len: 0,
+                    shaped_runs: Vec::new(),
                 });
-                current_y += line_height;
                 continue;
             }
 
@@ -407,126 +478,188 @@ impl TextLayouter {
                 }
             }
 
-            let mut break_ops: Vec<usize> = linebreaks(para_text).map(|(pos, _)| pos).collect();
-            break_ops.sort();
-            break_ops.dedup();
-            let wrap_width = max_width.unwrap_or(f32::MAX);
+            let break_ops: Vec<usize> = linebreaks(para_text)
+                .map(|(pos, _)| para_range.start + pos)
+                .collect();
 
-            let line_ranges =
-                build_line_ranges(para_text.len(), &shaped_runs, &break_ops, wrap_width);
+            // Build fragments for this paragraph
+            let para_end = para_range.start + para_text.len();
+            let mut para_x = 0.0_f32;
+            let mut para_frags: Vec<Fragment> = Vec::new();
 
-            for (line_start, line_end) in line_ranges {
-                let mut line_glyphs: Vec<ShapedRun> = Vec::new();
-                let line_byte_start = para_range.start + line_start;
+            for (run, _) in &shaped_runs {
+                for g in &run.glyphs {
+                    let cluster = para_range.start + g.cluster as usize;
+                    para_frags.push(Fragment {
+                        cluster,
+                        x: para_x,
+                        width: g.x_advance,
+                        break_after: false,
+                    });
+                    para_x += g.x_advance;
+                }
+            }
 
-                for (run, dir) in &shaped_runs {
-                    let run_byte_start = para_range.start;
-                    for g in &run.glyphs {
-                        let abs_cluster = run_byte_start + g.cluster as usize;
-                        if abs_cluster >= line_byte_start
-                            && abs_cluster < line_byte_start + (line_end - line_start)
-                        {
-                            let last = line_glyphs.last_mut();
-                            if let Some(last) = last {
-                                if last.font_key == run.font_key && last.direction == *dir {
-                                    last.glyphs.push(GlyphPosition {
-                                        glyph_id: g.glyph_id,
-                                        x_advance: g.x_advance,
-                                        y_advance: g.y_advance,
-                                        x_offset: g.x_offset,
-                                        y_offset: g.y_offset,
-                                        cluster: g.cluster,
-                                    });
-                                    continue;
-                                }
-                            }
-                            line_glyphs.push(ShapedRun {
-                                glyphs: vec![GlyphPosition {
+            // Mark break opportunities using cluster boundaries
+            for i in 0..para_frags.len() {
+                let next_cluster = para_frags.get(i + 1).map(|f| f.cluster).unwrap_or(para_end);
+                if break_ops.contains(&next_cluster) {
+                    para_frags[i].break_after = true;
+                }
+            }
+
+            all_fragments.extend(para_frags);
+            paras.push(ParaShapedData {
+                offset: para_range.start,
+                len: para_text.len(),
+                shaped_runs,
+            });
+        }
+
+        ShapedText {
+            fragments: all_fragments,
+            paras,
+        }
+    }
+
+    /// Positions glyphs into lines according to the provided line ranges.
+    ///
+    /// `line_ranges` must be `(start_byte, end_byte)` pairs into the original
+    /// text, typically produced by an external layout engine.
+    pub fn layout_lines(
+        &mut self,
+        shaped: &ShapedText,
+        line_ranges: &[(usize, usize)],
+        style: &TextStyle<'_>,
+    ) -> TextLayout {
+        if line_ranges.is_empty() {
+            return TextLayout {
+                lines: Vec::new(),
+                width: 0.0,
+                height: 0.0,
+            };
+        }
+
+        let line_height = style.font_size * style.line_height;
+        let mut all_lines: Vec<LayoutLine> = Vec::new();
+        let mut current_y = 0.0_f32;
+        let mut max_line_width = 0.0_f32;
+
+        for &(line_start, line_end) in line_ranges {
+            // Find the paragraph containing this line
+            let para = match shaped
+                .paras
+                .iter()
+                .find(|p| p.offset <= line_start && line_start < p.offset + p.len)
+            {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Filter glyphs for this line range
+            let mut line_glyphs: Vec<ShapedRun> = Vec::new();
+            for (run, dir) in &para.shaped_runs {
+                let run_byte_start = para.offset;
+                for g in &run.glyphs {
+                    let abs_cluster = run_byte_start + g.cluster as usize;
+                    if abs_cluster >= line_start && abs_cluster < line_end {
+                        let last = line_glyphs.last_mut();
+                        if let Some(last) = last {
+                            if last.font_key == run.font_key && last.direction == *dir {
+                                last.glyphs.push(GlyphPosition {
                                     glyph_id: g.glyph_id,
                                     x_advance: g.x_advance,
                                     y_advance: g.y_advance,
                                     x_offset: g.x_offset,
                                     y_offset: g.y_offset,
                                     cluster: g.cluster,
-                                }],
-                                font_key: run.font_key,
-                                font_data: run.font_data.clone(),
-                                direction: *dir,
-                            });
+                                });
+                                continue;
+                            }
                         }
+                        line_glyphs.push(ShapedRun {
+                            glyphs: vec![GlyphPosition {
+                                glyph_id: g.glyph_id,
+                                x_advance: g.x_advance,
+                                y_advance: g.y_advance,
+                                x_offset: g.x_offset,
+                                y_offset: g.y_offset,
+                                cluster: g.cluster,
+                            }],
+                            font_key: run.font_key,
+                            font_data: run.font_data.clone(),
+                            direction: *dir,
+                        });
                     }
                 }
-
-                let mut line_width = 0.0_f32;
-                let mut max_ascent = 0.0_f32;
-                let mut max_descent = 0.0_f32;
-                let mut positioned: Vec<(f32, u32, f32, f32, f32)> = Vec::new();
-
-                for run in &line_glyphs {
-                    for g in &run.glyphs {
-                        let cache_entry = self.glyph_cache.get_or_rasterize(
-                            run.font_key,
-                            &run.font_data,
-                            g.glyph_id,
-                            style.font_size,
-                        );
-                        let (w, h, bx, by) = match cache_entry {
-                            Some(ref entry) => (
-                                entry.rasterized.width as f32,
-                                entry.rasterized.height as f32,
-                                entry.rasterized.bearing_x as f32,
-                                entry.rasterized.bearing_y as f32,
-                            ),
-                            None => (0.0, 0.0, 0.0, 0.0),
-                        };
-
-                        let ascent = by;
-                        let descent = (h - by).max(0.0);
-                        max_ascent = max_ascent.max(ascent);
-                        max_descent = max_descent.max(descent);
-
-                        let x_pos = line_width + g.x_offset + bx;
-                        let y_pos = ascent - by + g.y_offset;
-
-                        positioned.push((x_pos, g.glyph_id, w, h, y_pos));
-                        line_width += g.x_advance;
-                    }
-                }
-
-                if line_width > max_line_width {
-                    max_line_width = line_width;
-                }
-
-                let line_height_px = max_ascent + max_descent;
-                let baseline = max_ascent;
-
-                let positioned_glyphs: Vec<LayoutGlyph> = positioned
-                    .into_iter()
-                    .map(|(x, gid, w, h, y)| LayoutGlyph {
-                        glyph_id: gid,
-                        x,
-                        y: current_y + y,
-                        width: w,
-                        height: h,
-                        color: style.color,
-                    })
-                    .collect();
-
-                all_lines.push(LayoutLine {
-                    glyphs: positioned_glyphs,
-                    x: 0.0,
-                    y: current_y,
-                    width: line_width,
-                    height: line_height_px.max(line_height),
-                    baseline,
-                });
-
-                current_y += line_height_px.max(line_height);
             }
 
-            if runs.is_empty() {
-                current_y += line_height;
+            // Position glyphs
+            let mut line_width = 0.0_f32;
+            let mut max_ascent = 0.0_f32;
+            let mut max_descent = 0.0_f32;
+            let mut positioned: Vec<(f32, u32, f32, f32, f32)> = Vec::new();
+
+            for run in &line_glyphs {
+                for g in &run.glyphs {
+                    let cache_entry = self.glyph_cache.get_or_rasterize(
+                        run.font_key,
+                        &run.font_data,
+                        g.glyph_id,
+                        style.font_size,
+                    );
+                    let (w, h, bx, by) = match cache_entry {
+                        Some(ref entry) => (
+                            entry.rasterized.width as f32,
+                            entry.rasterized.height as f32,
+                            entry.rasterized.bearing_x as f32,
+                            entry.rasterized.bearing_y as f32,
+                        ),
+                        None => (0.0, 0.0, 0.0, 0.0),
+                    };
+
+                    let ascent = by;
+                    let descent = (h - by).max(0.0);
+                    max_ascent = max_ascent.max(ascent);
+                    max_descent = max_descent.max(descent);
+
+                    let x_pos = line_width + g.x_offset + bx;
+                    let y_pos = ascent - by + g.y_offset;
+
+                    positioned.push((x_pos, g.glyph_id, w, h, y_pos));
+                    line_width += g.x_advance;
+                }
             }
+
+            if line_width > max_line_width {
+                max_line_width = line_width;
+            }
+
+            let line_height_px = max_ascent + max_descent;
+            let baseline = max_ascent;
+
+            let positioned_glyphs: Vec<LayoutGlyph> = positioned
+                .into_iter()
+                .map(|(x, gid, w, h, y)| LayoutGlyph {
+                    glyph_id: gid,
+                    x,
+                    y: current_y + y,
+                    width: w,
+                    height: h,
+                    color: style.color,
+                })
+                .collect();
+
+            all_lines.push(LayoutLine {
+                glyphs: positioned_glyphs,
+                x: 0.0,
+                y: current_y,
+                width: line_width,
+                height: line_height_px.max(line_height),
+                baseline,
+            });
+
+            current_y += line_height_px.max(line_height);
         }
 
         TextLayout {
@@ -534,6 +667,30 @@ impl TextLayouter {
             width: max_line_width,
             height: current_y,
         }
+    }
+
+    /// Produces a fully laid-out `TextLayout` for the given text.
+    ///
+    /// Internally runs bidi resolution, line breaking, shaping, and
+    /// rasterization. Glyph bitmaps are cached across calls to avoid
+    /// re-rasterizing identical characters at the same size.
+    ///
+    /// For more control over line breaking, use [`Self::shape_text`] +
+    /// [`Self::layout_lines`] instead.
+    ///
+    /// Available only with the **`layout-text`** feature (enabled by default).
+    #[cfg(feature = "layout-text")]
+    pub fn layout_text(
+        &mut self,
+        font_system: &mut FontSystem,
+        text: &str,
+        style: &TextStyle<'_>,
+        max_width: Option<f32>,
+    ) -> TextLayout {
+        let shaped = self.shape_text(font_system, text, style);
+        let wrap_width = max_width.unwrap_or(f32::MAX);
+        let line_ranges = build_line_ranges(text.len(), &shaped.fragments, wrap_width);
+        self.layout_lines(&shaped, &line_ranges, style)
     }
 }
 
@@ -553,11 +710,7 @@ struct VisualRun {
 ///
 /// Each run is a contiguous span of text that shares the same resolved
 /// direction (LTR or RTL). Adjacent runs with the same direction are merged.
-fn build_visual_runs(
-    text: &str,
-    base_direction: Direction,
-    levels: &[u8],
-) -> Vec<VisualRun> {
+fn build_visual_runs(text: &str, base_direction: Direction, levels: &[u8]) -> Vec<VisualRun> {
     if text.is_empty() {
         return Vec::new();
     }
@@ -600,71 +753,52 @@ fn build_visual_runs(
     runs
 }
 
-/// Groups shaped glyphs into line ranges based on width and break opportunities.
+/// Groups fragments into line ranges using greedy wrapping.
 ///
-/// Returns `(start, end)` byte-index pairs into the original text. Each pair
-/// represents one line's worth of content after soft-wrapping at word boundaries.
+/// This is a convenience used by [`TextLayouter::layout_text`]; external
+/// layout engines implement their own line-breaking logic.
+#[cfg(feature = "layout-text")]
 fn build_line_ranges(
     text_len: usize,
-    shaped_runs: &[(ShapedRun, Direction)],
-    break_ops: &[usize],
+    fragments: &[Fragment],
     max_width: f32,
 ) -> Vec<(usize, usize)> {
-    if text_len == 0 {
-        return Vec::new();
+    if fragments.is_empty() {
+        return vec![(0, text_len)];
     }
 
     if max_width >= f32::MAX || max_width <= 0.0 {
         return vec![(0, text_len)];
     }
 
-    let char_advances: Vec<f32> = {
-        let mut advances = Vec::with_capacity(text_len);
-        for (run, _) in shaped_runs {
-            for g in &run.glyphs {
-                advances.push(g.x_advance);
-            }
-        }
-        if advances.is_empty() {
-            return vec![(0, text_len)];
-        }
-        advances
-    };
-
     let mut lines: Vec<(usize, usize)> = Vec::new();
-    let mut line_start = 0_usize;
-    let mut last_break = 0_usize;
+    let mut line_start: usize = 0;
+    let mut last_break: Option<usize> = None;
     let mut line_width = 0.0_f32;
 
-    for (i, &advance) in char_advances.iter().enumerate() {
-        line_width += advance;
+    for i in 0..fragments.len() {
+        let frag = &fragments[i];
+        line_width += frag.width;
+
         if line_width > max_width {
-            let break_at = if last_break > line_start {
-                last_break
-            } else {
-                i
-            };
+            let break_at = last_break.unwrap_or(frag.cluster);
             lines.push((line_start, break_at));
             line_start = break_at;
             line_width = 0.0;
-            last_break = break_at;
-            if break_at < i {
-                line_width += advance;
+            last_break = None;
+            if break_at < frag.cluster {
+                line_width = frag.width;
             }
         }
 
-        let is_break = break_ops.contains(&(i + 1));
-        if is_break && i + 1 > line_start {
-            last_break = i + 1;
+        if frag.break_after {
+            let next = fragments.get(i + 1).map(|f| f.cluster).unwrap_or(text_len);
+            last_break = Some(next);
         }
     }
 
-    if line_start < char_advances.len() {
-        lines.push((line_start, char_advances.len()));
-    }
-
-    if lines.is_empty() {
-        lines.push((0, char_advances.len()));
+    if line_start < text_len {
+        lines.push((line_start, text_len));
     }
 
     lines
