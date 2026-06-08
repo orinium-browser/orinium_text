@@ -7,6 +7,12 @@ use rustybuzz::Face;
 use crate::layout::RasterizedGlyph;
 use crate::types::{FontKey, FontStyle, FontWeight};
 
+/// Cached glyph bitmap (alpha mask).
+struct CachedBitmap {
+    metrics: RasterizedGlyph,
+    alpha_mask: Vec<u8>,
+}
+
 /// Keeps font bytes alive while caching a parsed `rustybuzz::Face`.
 ///
 /// `Face` borrows the underlying font data. This struct bundles them
@@ -41,6 +47,7 @@ pub struct FontSystem {
     pub(crate) font_data: HashMap<fontdb::ID, Vec<u8>>,
     pub(crate) parsed_fonts: HashMap<fontdb::ID, Font>,
     rasterized: HashMap<(fontdb::ID, u32, u32), RasterizedGlyph>,
+    bitmap_cache: HashMap<(fontdb::ID, u32, u32), CachedBitmap>,
     face_cache: HashMap<fontdb::ID, CachedFace>,
 }
 
@@ -54,6 +61,7 @@ impl FontSystem {
             font_data: HashMap::new(),
             parsed_fonts: HashMap::new(),
             rasterized: HashMap::new(),
+            bitmap_cache: HashMap::new(),
             face_cache: HashMap::new(),
         }
     }
@@ -77,6 +85,7 @@ impl FontSystem {
             font_data,
             parsed_fonts: HashMap::new(),
             rasterized: HashMap::new(),
+            bitmap_cache: HashMap::new(),
             face_cache: HashMap::new(),
         }
     }
@@ -118,6 +127,48 @@ impl FontSystem {
         };
         self.rasterized.insert(key, rasterized);
         Some(&self.rasterized[&key])
+    }
+
+    /// Returns rasterized metrics AND the alpha-mask bitmap for the given
+    /// glyph, caching both so the same glyph at the same font size is never
+    /// rasterized twice.
+    ///
+    /// Unlike [`get_or_rasterize`] (which returns a borrowed reference), this
+    /// returns owned data so it can be used without fighting the borrow
+    /// checker when also mutating `self` (e.g. rasterizing more glyphs).
+    ///
+    /// This is the rendering counterpart of [`get_or_rasterize`], which only
+    /// caches metrics.
+    pub fn get_or_rasterize_with_bitmap(
+        &mut self,
+        font_key: FontKey,
+        glyph_id: u32,
+        font_size: f32,
+    ) -> Option<(RasterizedGlyph, Vec<u8>)> {
+        let size_bits = font_size.to_bits();
+        let key = (font_key.0, glyph_id, size_bits);
+        if let Some(cached) = self.bitmap_cache.get(&key) {
+            return Some((cached.metrics.clone(), cached.alpha_mask.clone()));
+        }
+        if !self.parsed_fonts.contains_key(&font_key.0) {
+            let data = self.get_font_data(font_key)?.to_vec();
+            let font = Font::from_bytes(data, FontSettings::default()).ok()?;
+            self.parsed_fonts.insert(font_key.0, font);
+        }
+        let font = self.parsed_fonts.get(&font_key.0)?;
+        let (metrics, alpha_mask) = font.rasterize_indexed(glyph_id as u16, font_size);
+        let rasterized = RasterizedGlyph {
+            width: metrics.width as u32,
+            height: metrics.height as u32,
+            bearing_x: metrics.xmin,
+            bearing_y: metrics.ymin,
+        };
+        self.bitmap_cache.insert(key, CachedBitmap {
+            metrics: rasterized,
+            alpha_mask,
+        });
+        let cached = &self.bitmap_cache[&key];
+        Some((cached.metrics.clone(), cached.alpha_mask.clone()))
     }
 
     /// Returns a cached `rustybuzz::Face` for the given font, creating and
