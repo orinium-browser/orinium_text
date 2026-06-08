@@ -1,11 +1,11 @@
 # orinium_text
 
-A 2D text layout library for Rust.
+A CPU-side 2D text layout and software rendering library for Rust.
 
 ## Pipeline
 
 ```
-Text → Bidi resolution → Visual runs → Shaping (rustybuzz) → Line breaking → Glyph rasterization (fontdue) → Positioned glyphs
+Text → Bidi resolution → Visual runs → Shaping (rustybuzz) → Line breaking → Glyph rasterization (fontdue) → Positioned glyphs → Software renderer → RGBA image
 ```
 
 ## Dependencies
@@ -24,11 +24,13 @@ Text → Bidi resolution → Visual runs → Shaping (rustybuzz) → Line breaki
 - **Fragment**: The atomic layout unit — one glyph cluster with its advance width and line-break eligibility.
 - **ShapedRun**: Internal per-font, per-direction run of positioned glyphs.
 - **Visual run**: A contiguous span of text with the same resolved bidi direction.
+- **RasterizedGlyph**: Public metrics struct (`width`, `height`, `bearing_x`, `bearing_y`) returned by the bitmap cache.
+- **RgbaImage**: CPU-side RGBA pixel buffer, independent of any GPU API.
 
 ## Usage
 
 ```rust
-use orinium_text::{FontSystem, TextLayouter, TextStyle};
+use orinium_text::{FontSystem, TextLayouter, TextStyle, RgbaImage};
 
 let mut font_system = FontSystem::new();
 let mut layouter = TextLayouter::new();
@@ -42,13 +44,19 @@ let shaped = layouter.shape_text(&mut font_system, "Hello, world!", &style);
 let line_ranges = vec![(0, 13)];  // (start_byte, end_byte) in the original text
 
 // 3. Position glyphs into lines
-let layout = layouter.layout_lines(&shaped, &line_ranges, &style);
+let layout = layouter.layout_lines(&mut font_system, &shaped, &line_ranges, &style);
 
 for line in &layout.lines {
     for glyph in &line.glyphs {
-        // glyph.glyph_id, glyph.x, glyph.y, glyph.width, glyph.height
+        // glyph.glyph_id, glyph.x, glyph.y, glyph.width, glyph.height,
+        // glyph.font_key, glyph.font_size
     }
 }
+
+// 4. (optional) Render to an RGBA image
+#[cfg(feature = "render")]
+let image = orinium_text::render_text(&mut font_system, &layout, orinium_text::Color(255, 255, 255, 255));
+// image.data — raw RGBA bytes, image.width, image.height
 ```
 
 ### Loading custom fonts
@@ -60,4 +68,5 @@ let mut font_system = FontSystem::new_with_fonts(vec![font_data]);
 
 ## Features
 
+- `render` (default): Enables the software renderer (`render_text`) and [`RgbaImage`].
 - `layout-text` (default): Enables the convenience `layout_text()` method and `build_line_ranges()`.
