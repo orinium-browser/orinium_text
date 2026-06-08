@@ -131,6 +131,8 @@ fn test_layout_glyph_fields() {
         width: 8.0,
         height: 12.0,
         color: Color(0, 0, 0, 255),
+        font_key: None,
+        font_size: 16.0,
     };
     assert_eq!(g.glyph_id, 72);
     assert_eq!(g.x, 10.0);
@@ -548,6 +550,262 @@ fn test_text_style_exact_fonts_override() {
     let layout = layouter.layout_text(&mut fs, "Hello", &style, None);
     assert_eq!(layout.lines.len(), 1);
     assert!(!layout.lines[0].glyphs.is_empty());
+}
+
+#[test]
+fn test_japanese_text_does_not_panic() {
+    let mut fs = FontSystem::new();
+    let mut layouter = TextLayouter::new();
+    let style = default_style();
+
+    // Japanese text should not panic during shaping.
+    // The font fallback chain (SansSerif → Serif → Monospace) typically
+    // lacks CJK coverage, previously triggering a panic when coverage_ranges
+    // sliced at wrong byte offsets.
+    let pure_jp = "こんにちは世界";
+    let _ = layouter.shape_text(&mut fs, pure_jp, &style);
+    // Pure Japanese may produce 0 fragments if no CJK font is available.
+    // The critical thing is that it does not panic.
+
+    // Mixed ASCII + Japanese must produce at least the ASCII fragments.
+    let mixed_texts = ["Hello 日本語", "ABC日本語DEF", "aあbいcう"];
+    for text in mixed_texts {
+        let shaped = layouter.shape_text(&mut fs, text, &style);
+        assert!(
+            !shaped.fragments.is_empty(),
+            "expected fragments for '{text}'"
+        );
+    }
+
+    // Verify that all fragment clusters are valid byte offsets
+    for text in &["Hello 日本語", "ABC日本語DEF", "aあbいcう"] {
+        let shaped = layouter.shape_text(&mut fs, text, &style);
+        for frag in &shaped.fragments {
+            assert!(
+                frag.cluster <= text.len(),
+                "cluster {} out of bounds for '{text}'",
+                frag.cluster
+            );
+        }
+    }
+}
+
+#[cfg(feature = "layout-text")]
+#[test]
+fn test_japanese_layout_text_single_line() {
+    let mut fs = FontSystem::new();
+    let mut layouter = TextLayouter::new();
+    let style = default_style();
+
+    let layout = layouter.layout_text(&mut fs, "ABC日本語", &style, None);
+    assert_eq!(layout.lines.len(), 1, "single line expected");
+    // ASCII portion should produce glyphs even if CJK is not covered
+    assert!(!layout.lines[0].glyphs.is_empty(), "expected glyphs");
+    assert!(layout.width >= 0.0, "expected non-negative width");
+    assert!(layout.height >= 0.0, "expected non-negative height");
+}
+
+#[test]
+fn test_layout_lines_trailing_newline_does_not_panic() {
+    // Simulate orinium's usage pattern: split by \n, call shape_text + layout_lines
+    let text = "Hello\n";
+    let mut fs = FontSystem::new();
+    let mut layouter = TextLayouter::new();
+    let style = TextStyle {
+        font_size: 16.0,
+        color: Color(0, 0, 0, 255),
+        font_weight: FontWeight(400),
+        font_style: FontStyle::Normal,
+        line_height: 1.2,
+        bidi_mode: BidiMode::Ltr,
+        font_families: vec![fontdb::Family::SansSerif],
+        exact_fonts: Vec::new(),
+    };
+
+    let shaped = layouter.shape_text(&mut fs, text, &style);
+
+    let line_ranges: Vec<(usize, usize)> = text
+        .split('\n')
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            let end = start + line.len();
+            Some((start, end))
+        })
+        .collect();
+
+    let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
+    assert_eq!(layout.lines.len(), line_ranges.len(),
+        "layout.lines.len() ({}) must equal line_ranges.len() ({}) (trailing newline case)",
+        layout.lines.len(), line_ranges.len());
+}
+
+#[test]
+fn test_layout_lines_empty_text_newline() {
+    let text = "\n";
+    let mut fs = FontSystem::new();
+    let mut layouter = TextLayouter::new();
+    let style = TextStyle {
+        font_size: 16.0,
+        color: Color(0, 0, 0, 255),
+        font_weight: FontWeight(400),
+        font_style: FontStyle::Normal,
+        line_height: 1.2,
+        bidi_mode: BidiMode::Ltr,
+        font_families: vec![fontdb::Family::SansSerif],
+        exact_fonts: Vec::new(),
+    };
+
+    let shaped = layouter.shape_text(&mut fs, text, &style);
+
+    let line_ranges: Vec<(usize, usize)> = text
+        .split('\n')
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            let end = start + line.len();
+            Some((start, end))
+        })
+        .collect();
+
+    let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
+    assert_eq!(layout.lines.len(), line_ranges.len(),
+        "layout.lines.len() ({}) must equal line_ranges.len() ({}) (\\n only case)",
+        layout.lines.len(), line_ranges.len());
+}
+
+#[test]
+fn test_layout_lines_consecutive_newlines() {
+    let text = "ab\n\ncd";
+    let mut fs = FontSystem::new();
+    let mut layouter = TextLayouter::new();
+    let style = TextStyle {
+        font_size: 16.0,
+        color: Color(0, 0, 0, 255),
+        font_weight: FontWeight(400),
+        font_style: FontStyle::Normal,
+        line_height: 1.2,
+        bidi_mode: BidiMode::Ltr,
+        font_families: vec![fontdb::Family::SansSerif],
+        exact_fonts: Vec::new(),
+    };
+
+    let shaped = layouter.shape_text(&mut fs, text, &style);
+
+    let line_ranges: Vec<(usize, usize)> = text
+        .split('\n')
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            let end = start + line.len();
+            Some((start, end))
+        })
+        .collect();
+
+    let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
+    assert_eq!(layout.lines.len(), line_ranges.len(),
+        "layout.lines.len() ({}) must equal line_ranges.len() ({}) (consecutive \\n case)",
+        layout.lines.len(), line_ranges.len());
+}
+
+#[test]
+fn test_layout_lines_freeze_repro() {
+    // Reproduce the freeze from orinium: font_size=32, text="HTML Living Standard Test Page"
+    let font_paths = [
+        r"C:\Windows\Fonts\arial.ttf",
+        r"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        r"/usr/share/fonts/TTF/DejaVuSans.ttf",
+        r"/System/Library/Fonts/Helvetica.ttc",
+    ];
+
+    let data = match font_paths.iter().find_map(|p| std::fs::read(p).ok()) {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping freeze repro test: no system font found");
+            return;
+        }
+    };
+
+    let mut fs = FontSystem::new();
+    let exact_fonts = fs.load_font_data(data);
+
+    let mut layouter = TextLayouter::new();
+    let style = TextStyle {
+        font_size: 32.0,
+        color: Color(0, 0, 0, 255),
+        font_weight: FontWeight(400),
+        font_style: FontStyle::Normal,
+        line_height: 1.2,
+        bidi_mode: BidiMode::Ltr,
+        font_families: vec![fontdb::Family::SansSerif],
+        exact_fonts,
+    };
+
+    let text = "HTML Living Standard Test Page";
+    let shaped = layouter.shape_text(&mut fs, text, &style);
+    assert!(!shaped.fragments.is_empty(), "expected fragments");
+
+    // Simulate orinium's measure: split by \n (no trailing newline in this case)
+    let line_ranges: Vec<(usize, usize)> = text
+        .split('\n')
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            let end = start + line.len();
+            Some((start, end))
+        })
+        .collect();
+
+    let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
+    assert_eq!(layout.lines.len(), line_ranges.len(),
+        "should produce same number of lines as line_ranges");
+    assert!(!layout.lines.is_empty(), "should have at least one line");
+}
+
+#[test]
+fn test_layout_lines_msgothic_ttc() {
+    // orinium loads msgothic.ttc as first candidate on Windows
+    let font_path = r"C:\Windows\Fonts\msgothic.ttc";
+    if !std::path::Path::new(font_path).exists() {
+        eprintln!("skipping: msgothic.ttc not found");
+        return;
+    }
+
+    let data = std::fs::read(font_path).expect("read msgothic.ttc");
+    let mut fs = FontSystem::new();
+    let exact_fonts = fs.load_font_data(data);
+
+    let mut layouter = TextLayouter::new();
+    let style = TextStyle {
+        font_size: 32.0,
+        color: Color(0, 0, 0, 255),
+        font_weight: FontWeight(400),
+        font_style: FontStyle::Normal,
+        line_height: 1.2,
+        bidi_mode: BidiMode::Ltr,
+        font_families: vec![fontdb::Family::SansSerif],
+        exact_fonts,
+    };
+
+    // Test with ASCII text (like orinium's initial page title)
+    let text = "HTML Living Standard Test Page";
+    let shaped = layouter.shape_text(&mut fs, text, &style);
+    assert!(!shaped.fragments.is_empty(),
+        "expected fragments for ASCII text with msgothic.ttc");
+
+    let line_ranges: Vec<(usize, usize)> = text
+        .split('\n')
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            let end = start + line.len();
+            Some((start, end))
+        })
+        .collect();
+
+    let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
+    assert_eq!(layout.lines.len(), line_ranges.len());
+    assert!(!layout.lines.is_empty());
 }
 
 #[cfg(feature = "layout-text")]
