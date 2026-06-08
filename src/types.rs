@@ -73,6 +73,10 @@ pub struct LayoutGlyph {
     pub width: f32,
     pub height: f32,
     pub color: Color,
+    /// The font this glyph was shaped with. `None` for glyphs on empty lines.
+    pub font_key: Option<FontKey>,
+    /// The font size used when rasterizing this glyph.
+    pub font_size: f32,
 }
 
 /// A single line of laid-out text.
