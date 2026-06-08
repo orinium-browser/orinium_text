@@ -36,11 +36,13 @@ impl Direction {
     }
 }
 
-pub(crate) struct RasterizedGlyph {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) bearing_x: i32,
-    pub(crate) bearing_y: i32,
+/// Metrics for a rasterized glyph: dimensions and pixel-space bearing.
+#[derive(Debug, Clone)]
+pub struct RasterizedGlyph {
+    pub width: u32,
+    pub height: u32,
+    pub bearing_x: i32,
+    pub bearing_y: i32,
 }
 
 fn shape_text(
@@ -561,7 +563,7 @@ impl TextLayouter {
             let mut line_width = 0.0_f32;
             let mut max_ascent = 0.0_f32;
             let mut max_descent = 0.0_f32;
-            let mut positioned: Vec<(f32, u32, f32, f32, f32)> = Vec::new();
+            let mut positioned: Vec<(f32, u32, f32, f32, f32, FontKey)> = Vec::new();
 
             for run in &line_glyphs {
                 for g in &run.glyphs {
@@ -583,7 +585,7 @@ impl TextLayouter {
                     let x_pos = line_width + g.x_offset + bx;
                     let y_pos = ascent - by + g.y_offset;
 
-                    positioned.push((x_pos, g.glyph_id, w, h, y_pos));
+                    positioned.push((x_pos, g.glyph_id, w, h, y_pos, run.font_key));
                     line_width += g.x_advance;
                 }
             }
@@ -597,13 +599,15 @@ impl TextLayouter {
 
             let positioned_glyphs: Vec<LayoutGlyph> = positioned
                 .into_iter()
-                .map(|(x, gid, w, h, y)| LayoutGlyph {
+                .map(|(x, gid, w, h, y, fk)| LayoutGlyph {
                     glyph_id: gid,
                     x,
                     y: current_y + y,
                     width: w,
                     height: h,
                     color: style.color,
+                    font_key: Some(fk),
+                    font_size: style.font_size,
                 })
                 .collect();
 
