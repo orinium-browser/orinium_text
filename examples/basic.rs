@@ -34,7 +34,7 @@ fn main() {
 
     // Pass line ranges directly to layout_lines
     let line_ranges = vec![(0, text2.len())];
-    let layout2 = layouter.layout_lines(&shaped, &line_ranges, &style);
+    let layout2 = layouter.layout_lines(&mut font_system, &shaped, &line_ranges, &style);
     println!(
         "\n  layout_lines result: {} line(s), width={:.1}, height={:.1}",
         layout2.lines.len(),
