@@ -461,7 +461,7 @@ fn test_shape_text_plus_layout_lines_workflow() {
     assert!(!shaped.fragments.is_empty());
 
     let line_ranges = vec![(0, 11)];
-    let layout = layouter.layout_lines(&shaped, &line_ranges, &style);
+    let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
     assert_eq!(layout.lines.len(), 1, "single line expected");
     assert!(!layout.lines[0].glyphs.is_empty(), "expected glyphs");
 }
@@ -473,7 +473,7 @@ fn test_layout_lines_skips_empty_range() {
     let style = default_style();
 
     let shaped = layouter.shape_text(&mut fs, "Hello", &style);
-    let layout = layouter.layout_lines(&shaped, &[], &style);
+    let layout = layouter.layout_lines(&mut fs, &shaped, &[], &style);
     assert!(layout.lines.is_empty());
 }
 
