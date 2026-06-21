@@ -123,7 +123,7 @@ impl FontSystem {
             width: metrics.width as u32,
             height: metrics.height as u32,
             bearing_x: metrics.xmin,
-            bearing_y: metrics.ymin,
+            bearing_y: metrics.ymin + metrics.height as i32,
         };
         self.rasterized.insert(key, rasterized);
         Some(&self.rasterized[&key])
@@ -161,12 +161,15 @@ impl FontSystem {
             width: metrics.width as u32,
             height: metrics.height as u32,
             bearing_x: metrics.xmin,
-            bearing_y: metrics.ymin,
+            bearing_y: metrics.ymin + metrics.height as i32,
         };
-        self.bitmap_cache.insert(key, CachedBitmap {
-            metrics: rasterized,
-            alpha_mask,
-        });
+        self.bitmap_cache.insert(
+            key,
+            CachedBitmap {
+                metrics: rasterized,
+                alpha_mask,
+            },
+        );
         let cached = &self.bitmap_cache[&key];
         Some((cached.metrics.clone(), cached.alpha_mask.clone()))
     }
