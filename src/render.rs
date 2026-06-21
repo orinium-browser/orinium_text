@@ -25,11 +25,9 @@ pub fn render_text(
             let Some(font_key) = glyph.font_key else {
                 continue;
             };
-            let Some((metrics, alpha_mask)) = font_system.get_or_rasterize_with_bitmap(
-                font_key,
-                glyph.glyph_id,
-                glyph.font_size,
-            ) else {
+            let Some((metrics, alpha_mask)) =
+                font_system.get_or_rasterize_with_bitmap(font_key, glyph.glyph_id, glyph.font_size)
+            else {
                 continue;
             };
             image.blend_alpha_mask(
