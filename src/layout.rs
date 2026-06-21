@@ -45,12 +45,7 @@ pub struct RasterizedGlyph {
     pub bearing_y: i32,
 }
 
-fn shape_text(
-    face: &Face,
-    text: &str,
-    font_size: f32,
-    direction: Direction,
-) -> Vec<GlyphPosition> {
+fn shape_text(face: &Face, text: &str, font_size: f32, direction: Direction) -> Vec<GlyphPosition> {
     let upem = face.units_per_em() as f32;
     let scale = font_size / upem;
 
@@ -495,18 +490,14 @@ impl TextLayouter {
 
         for &(line_start, line_end) in line_ranges {
             // Find the paragraph containing this line
-            let para = match shaped
-                .paras
-                .iter()
-                .find(|p| {
-                    p.offset <= line_start
-                        && (if p.len == 0 {
-                            p.offset == line_start
-                        } else {
-                            line_start < p.offset + p.len
-                        })
-                })
-            {
+            let para = match shaped.paras.iter().find(|p| {
+                p.offset <= line_start
+                    && (if p.len == 0 {
+                        p.offset == line_start
+                    } else {
+                        line_start < p.offset + p.len
+                    })
+            }) {
                 Some(p) => p,
                 None => {
                     all_lines.push(LayoutLine {
@@ -560,34 +551,52 @@ impl TextLayouter {
             }
 
             // Position glyphs
-            let mut line_width = 0.0_f32;
-            let mut max_ascent = 0.0_f32;
-            let mut max_descent = 0.0_f32;
-            let mut positioned: Vec<(f32, u32, f32, f32, f32, FontKey)> = Vec::new();
+            struct GlyphLayoutData {
+                glyph_id: u32,
+                w: f32,
+                h: f32,
+                bx: f32,
+                by: f32,
+                x_advance: f32,
+                x_offset: f32,
+                y_offset: f32,
+                font_key: FontKey,
+            }
 
+            let mut glyph_data: Vec<GlyphLayoutData> = Vec::new();
             for run in &line_glyphs {
                 for g in &run.glyphs {
-                    let rasterized = font_system.get_or_rasterize(
-                        run.font_key,
-                        g.glyph_id,
-                        style.font_size,
-                    );
-                    let (w, h, bx, by) = match rasterized {
-                        Some(r) => (r.width as f32, r.height as f32, r.bearing_x as f32, r.bearing_y as f32),
-                        None => (0.0, 0.0, 0.0, 0.0),
-                    };
-
-                    let ascent = by;
-                    let descent = (h - by).max(0.0);
-                    max_ascent = max_ascent.max(ascent);
-                    max_descent = max_descent.max(descent);
-
-                    let x_pos = line_width + g.x_offset + bx;
-                    let y_pos = ascent - by + g.y_offset;
-
-                    positioned.push((x_pos, g.glyph_id, w, h, y_pos, run.font_key));
-                    line_width += g.x_advance;
+                    if let Some(r) =
+                        font_system.get_or_rasterize(run.font_key, g.glyph_id, style.font_size)
+                    {
+                        glyph_data.push(GlyphLayoutData {
+                            glyph_id: g.glyph_id,
+                            w: r.width as f32,
+                            h: r.height as f32,
+                            bx: r.bearing_x as f32,
+                            by: r.bearing_y as f32,
+                            x_advance: g.x_advance,
+                            x_offset: g.x_offset,
+                            y_offset: g.y_offset,
+                            font_key: run.font_key,
+                        });
+                    }
                 }
+            }
+
+            let max_ascent = glyph_data.iter().map(|d| d.by).fold(0.0f32, f32::max);
+            let max_descent = glyph_data
+                .iter()
+                .map(|d| (d.h - d.by).max(0.0))
+                .fold(0.0f32, f32::max);
+
+            let mut line_width = 0.0_f32;
+            let mut positioned: Vec<(f32, u32, f32, f32, f32, FontKey)> = Vec::new();
+            for d in &glyph_data {
+                let x_pos = line_width + d.x_offset + d.bx;
+                let y_pos = max_ascent - d.by + d.y_offset;
+                positioned.push((x_pos, d.glyph_id, d.w, d.h, y_pos, d.font_key));
+                line_width += d.x_advance;
             }
 
             if line_width > max_line_width {
