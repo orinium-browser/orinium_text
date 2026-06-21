@@ -635,9 +635,13 @@ fn test_layout_lines_trailing_newline_does_not_panic() {
         .collect();
 
     let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
-    assert_eq!(layout.lines.len(), line_ranges.len(),
+    assert_eq!(
+        layout.lines.len(),
+        line_ranges.len(),
         "layout.lines.len() ({}) must equal line_ranges.len() ({}) (trailing newline case)",
-        layout.lines.len(), line_ranges.len());
+        layout.lines.len(),
+        line_ranges.len()
+    );
 }
 
 #[test]
@@ -669,9 +673,13 @@ fn test_layout_lines_empty_text_newline() {
         .collect();
 
     let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
-    assert_eq!(layout.lines.len(), line_ranges.len(),
+    assert_eq!(
+        layout.lines.len(),
+        line_ranges.len(),
         "layout.lines.len() ({}) must equal line_ranges.len() ({}) (\\n only case)",
-        layout.lines.len(), line_ranges.len());
+        layout.lines.len(),
+        line_ranges.len()
+    );
 }
 
 #[test]
@@ -703,9 +711,13 @@ fn test_layout_lines_consecutive_newlines() {
         .collect();
 
     let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
-    assert_eq!(layout.lines.len(), line_ranges.len(),
+    assert_eq!(
+        layout.lines.len(),
+        line_ranges.len(),
         "layout.lines.len() ({}) must equal line_ranges.len() ({}) (consecutive \\n case)",
-        layout.lines.len(), line_ranges.len());
+        layout.lines.len(),
+        line_ranges.len()
+    );
 }
 
 #[test]
@@ -757,8 +769,11 @@ fn test_layout_lines_freeze_repro() {
         .collect();
 
     let layout = layouter.layout_lines(&mut fs, &shaped, &line_ranges, &style);
-    assert_eq!(layout.lines.len(), line_ranges.len(),
-        "should produce same number of lines as line_ranges");
+    assert_eq!(
+        layout.lines.len(),
+        line_ranges.len(),
+        "should produce same number of lines as line_ranges"
+    );
     assert!(!layout.lines.is_empty(), "should have at least one line");
 }
 
@@ -790,8 +805,10 @@ fn test_layout_lines_msgothic_ttc() {
     // Test with ASCII text (like orinium's initial page title)
     let text = "HTML Living Standard Test Page";
     let shaped = layouter.shape_text(&mut fs, text, &style);
-    assert!(!shaped.fragments.is_empty(),
-        "expected fragments for ASCII text with msgothic.ttc");
+    assert!(
+        !shaped.fragments.is_empty(),
+        "expected fragments for ASCII text with msgothic.ttc"
+    );
 
     let line_ranges: Vec<(usize, usize)> = text
         .split('\n')
