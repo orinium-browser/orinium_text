@@ -172,7 +172,8 @@ impl FontSystem {
         );
         // Also populate the metrics-only cache so callers that only
         // need metrics (layout) never rasterize again.
-        self.rasterized.insert(key, self.bitmap_cache[&key].metrics.clone());
+        self.rasterized
+            .insert(key, self.bitmap_cache[&key].metrics.clone());
         let cached = &self.bitmap_cache[&key];
         Some((cached.metrics.clone(), cached.alpha_mask.clone()))
     }
@@ -183,9 +184,12 @@ impl FontSystem {
     pub(crate) fn get_or_create_face(&mut self, key: FontKey) -> Option<&Face<'_>> {
         if !self.face_cache.contains_key(&key.0) {
             let data = self.get_font_data(key)?.to_vec();
-            let cached = CachedFace::new(data, 0)?;
+
+            let face_info = self.db.face(key.0)?;
+            let cached = CachedFace::new(data, face_info.index)?;
             self.face_cache.insert(key.0, cached);
         }
+
         Some(self.face_cache[&key.0].face())
     }
 
@@ -205,13 +209,16 @@ impl FontSystem {
     }
 
     /// Finds the best matching font for the given families, weight, and style.
+    ///
+    /// If none of the requested families are found, falls back to scanning
+    /// every loaded face's actual family names and returns the first match.
     pub fn query(
         &self,
         families: &[fontdb::Family],
         weight: FontWeight,
         style: FontStyle,
     ) -> Option<FontKey> {
-        let query = fontdb::Query {
+        let db_query = fontdb::Query {
             families,
             weight: fontdb::Weight(weight.0),
             style: match style {
@@ -221,13 +228,44 @@ impl FontSystem {
             },
             ..Default::default()
         };
-        let id = self.db.query(&query)?;
-        Some(FontKey(id))
+        if let Some(id) = self.db.query(&db_query) {
+            return Some(FontKey(id));
+        }
+        // Fallback: scan every face's actual family names
+        let candidates: Vec<String> = self
+            .db
+            .faces()
+            .flat_map(|face| face.families.iter().map(|(n, _)| n.clone()))
+            .filter(|n| !n.is_empty())
+            .collect();
+        for name in candidates {
+            let fam = fontdb::Family::Name(&name);
+            let q = fontdb::Query {
+                families: &[fam],
+                weight: fontdb::Weight(weight.0),
+                style: match style {
+                    FontStyle::Normal => fontdb::Style::Normal,
+                    FontStyle::Italic => fontdb::Style::Italic,
+                    FontStyle::Oblique => fontdb::Style::Oblique,
+                },
+                ..Default::default()
+            };
+            if let Some(id) = self.db.query(&q) {
+                return Some(FontKey(id));
+            }
+        }
+        None
     }
 
     /// Returns the keys of all currently loaded fonts.
     pub fn font_keys(&self) -> Vec<FontKey> {
-        self.font_data.keys().copied().map(FontKey).collect()
+        self.db.faces().map(|face| FontKey(face.id)).collect()
+    }
+
+    /// Returns a `FontKey` for every face in the database, regardless of
+    /// whether the font data has been cached yet.
+    pub fn all_font_keys(&self) -> Vec<FontKey> {
+        self.db.faces().map(|face| FontKey(face.id)).collect()
     }
 
     /// Returns the raw font data for a given key.
