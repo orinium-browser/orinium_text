@@ -15,7 +15,7 @@ pub fn render_text(
     let w = layout.width.ceil() as u32;
     let h = layout.height.ceil() as u32;
     if w == 0 || h == 0 {
-        return RgbaImage::new(1, 1, background);
+        return RgbaImage::new(w, h, background);
     }
 
     let mut image = RgbaImage::new(w, h, background);

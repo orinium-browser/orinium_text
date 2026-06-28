@@ -117,6 +117,11 @@ impl FontSystem {
         if self.rasterized.contains_key(&key) {
             return Some(&self.rasterized[&key]);
         }
+        // Reuse bitmap cache if already populated (e.g. by render_text).
+        if let Some(cached) = self.bitmap_cache.get(&key) {
+            self.rasterized.insert(key, cached.metrics.clone());
+            return Some(&self.rasterized[&key]);
+        }
         let font = self.get_or_parse_font(font_key)?;
         let (metrics, _bitmap) = font.rasterize_indexed(glyph_id as u16, font_size);
         let rasterized = RasterizedGlyph {
@@ -150,12 +155,7 @@ impl FontSystem {
         if let Some(cached) = self.bitmap_cache.get(&key) {
             return Some((cached.metrics.clone(), cached.alpha_mask.clone()));
         }
-        if !self.parsed_fonts.contains_key(&font_key.0) {
-            let data = self.get_font_data(font_key)?.to_vec();
-            let font = Font::from_bytes(data, FontSettings::default()).ok()?;
-            self.parsed_fonts.insert(font_key.0, font);
-        }
-        let font = self.parsed_fonts.get(&font_key.0)?;
+        let font = self.get_or_parse_font(font_key)?;
         let (metrics, alpha_mask) = font.rasterize_indexed(glyph_id as u16, font_size);
         let rasterized = RasterizedGlyph {
             width: metrics.width as u32,
@@ -170,6 +170,9 @@ impl FontSystem {
                 alpha_mask,
             },
         );
+        // Also populate the metrics-only cache so callers that only
+        // need metrics (layout) never rasterize again.
+        self.rasterized.insert(key, self.bitmap_cache[&key].metrics.clone());
         let cached = &self.bitmap_cache[&key];
         Some((cached.metrics.clone(), cached.alpha_mask.clone()))
     }

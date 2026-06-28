@@ -632,10 +632,60 @@ impl TextLayouter {
             current_y += line_height_px.max(line_height);
         }
 
+        // Compute the true bounding box of all glyph ink so the canvas
+        // size accounts for bearings, shaper offsets, and glyphs whose
+        // ink extends past their advance (e.g. italic swashes).
+        let mut ink_min_x = f32::MAX;
+        let mut ink_min_y = f32::MAX;
+        let mut ink_max_x = f32::MIN;
+        let mut ink_max_y = f32::MIN;
+        for line in &all_lines {
+            for g in &line.glyphs {
+                if g.x < ink_min_x {
+                    ink_min_x = g.x;
+                }
+                if g.y < ink_min_y {
+                    ink_min_y = g.y;
+                }
+                let right = g.x + g.width;
+                let bottom = g.y + g.height;
+                if right > ink_max_x {
+                    ink_max_x = right;
+                }
+                if bottom > ink_max_y {
+                    ink_max_y = bottom;
+                }
+            }
+        }
+
+        if ink_min_x != f32::MAX && ink_min_y != f32::MAX {
+            let offset_x = if ink_min_x < 0.0 { -ink_min_x } else { 0.0 };
+            let offset_y = if ink_min_y < 0.0 { -ink_min_y } else { 0.0 };
+
+            for line in &mut all_lines {
+                line.x += offset_x;
+                line.y += offset_y;
+                for g in &mut line.glyphs {
+                    g.x += offset_x;
+                    g.y += offset_y;
+                }
+            }
+
+            ink_max_x += offset_x;
+            ink_max_y += offset_y;
+            ink_min_x += offset_x;
+            ink_min_y += offset_y;
+        } else {
+            ink_min_x = 0.0;
+            ink_min_y = 0.0;
+            ink_max_x = 0.0;
+            ink_max_y = 0.0;
+        }
+
         TextLayout {
             lines: all_lines,
-            width: max_line_width,
-            height: current_y,
+            width: ink_max_x - ink_min_x,
+            height: ink_max_y - ink_min_y,
         }
     }
 
