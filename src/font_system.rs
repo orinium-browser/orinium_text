@@ -230,9 +230,9 @@ impl FontSystem {
         if let Some(id) = self.db.query(&db_query) {
             return Some(FontKey(id));
         }
-        // Fallback for generic families: when fontdb cannot classify any font
-        // (e.g. on systems without fontconfig), return the first font that
-        // matches the requested weight and style.
+        // When a generic family is requested but fontdb cannot match it
+        // (e.g. on systems without fontconfig), return the first available
+        // font as a fallback.
         let is_generic = families.iter().any(|f| {
             matches!(
                 f,
@@ -244,11 +244,7 @@ impl FontSystem {
             )
         });
         if is_generic {
-            for face in self.db.faces() {
-                if face.weight == db_weight && face.style == db_style {
-                    return Some(FontKey(face.id));
-                }
-            }
+            return self.db.faces().next().map(|f| FontKey(f.id));
         }
         None
     }
