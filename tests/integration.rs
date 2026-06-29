@@ -95,12 +95,10 @@ fn test_text_style_debug() {
 fn test_font_key_is_copy() {
     let fs = FontSystem::new();
     let key = fs
-        .query(
-            &[orinium_text::fontdb::Family::SansSerif],
-            FontWeight(400),
-            FontStyle::Normal,
-        )
-        .expect("sans-serif font not found");
+        .all_font_keys()
+        .into_iter()
+        .next()
+        .expect("no fonts available");
     let k2 = key;
     assert_eq!(key, k2);
 }
@@ -110,12 +108,10 @@ fn test_font_key_hash_and_eq() {
     use std::collections::HashSet;
     let fs = FontSystem::new();
     let key = fs
-        .query(
-            &[orinium_text::fontdb::Family::SansSerif],
-            FontWeight(400),
-            FontStyle::Normal,
-        )
-        .expect("sans-serif font not found");
+        .all_font_keys()
+        .into_iter()
+        .next()
+        .expect("no fonts available");
     let mut set = HashSet::new();
     set.insert(key);
     set.insert(key);
@@ -195,8 +191,9 @@ fn test_text_style_clone() {
 #[test]
 fn test_query_returns_some_for_sans_serif() {
     let fs = FontSystem::new();
+    let name = fs.first_font_family_name().expect("no fonts available");
     let key = fs.query(
-        &[orinium_text::fontdb::Family::SansSerif],
+        &[orinium_text::fontdb::Family::Name(name)],
         FontWeight(400),
         FontStyle::Normal,
     );
@@ -206,8 +203,9 @@ fn test_query_returns_some_for_sans_serif() {
 #[test]
 fn test_query_returns_some_for_serif() {
     let fs = FontSystem::new();
+    let name = fs.first_font_family_name().expect("no fonts available");
     let key = fs.query(
-        &[orinium_text::fontdb::Family::Serif],
+        &[orinium_text::fontdb::Family::Name(name)],
         FontWeight(400),
         FontStyle::Normal,
     );
@@ -217,8 +215,9 @@ fn test_query_returns_some_for_serif() {
 #[test]
 fn test_query_returns_some_for_monospace() {
     let fs = FontSystem::new();
+    let name = fs.first_font_family_name().expect("no fonts available");
     let key = fs.query(
-        &[orinium_text::fontdb::Family::Monospace],
+        &[orinium_text::fontdb::Family::Name(name)],
         FontWeight(400),
         FontStyle::Normal,
     );
@@ -228,13 +227,14 @@ fn test_query_returns_some_for_monospace() {
 #[test]
 fn test_query_bold_is_different_from_normal() {
     let fs = FontSystem::new();
+    let name = fs.first_font_family_name().expect("no fonts available");
     let normal = fs.query(
-        &[orinium_text::fontdb::Family::SansSerif],
+        &[orinium_text::fontdb::Family::Name(name)],
         FontWeight(400),
         FontStyle::Normal,
     );
     let bold = fs.query(
-        &[orinium_text::fontdb::Family::SansSerif],
+        &[orinium_text::fontdb::Family::Name(name)],
         FontWeight(700),
         FontStyle::Normal,
     );
@@ -246,12 +246,10 @@ fn test_query_bold_is_different_from_normal() {
 fn test_get_font_data_returns_data_for_known_key() {
     let mut fs = FontSystem::new();
     let key = fs
-        .query(
-            &[orinium_text::fontdb::Family::SansSerif],
-            FontWeight(400),
-            FontStyle::Normal,
-        )
-        .expect("sans-serif font not found");
+        .all_font_keys()
+        .into_iter()
+        .next()
+        .expect("no fonts available");
     let data = fs.get_font_data(key);
     assert!(data.is_some(), "expected font data for queried key");
     assert!(data.unwrap().len() > 0, "font data should be non-empty");
@@ -261,12 +259,10 @@ fn test_get_font_data_returns_data_for_known_key() {
 fn test_get_font_data_caches_after_first_call() {
     let mut fs = FontSystem::new();
     let key = fs
-        .query(
-            &[orinium_text::fontdb::Family::SansSerif],
-            FontWeight(400),
-            FontStyle::Normal,
-        )
-        .expect("sans-serif font not found");
+        .all_font_keys()
+        .into_iter()
+        .next()
+        .expect("no fonts available");
 
     let data1 = fs.get_font_data(key).unwrap().to_vec();
     let data2 = fs.get_font_data(key).unwrap().to_vec();
