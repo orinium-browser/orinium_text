@@ -119,6 +119,7 @@ dependencies = [
  "fontdb",
  "fontdue",
  "rustybuzz",
+ "ttf-parser 0.25.1",
  "unicode-bidi",
  "unicode-linebreak",
 ]

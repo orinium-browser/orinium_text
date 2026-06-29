@@ -11,6 +11,7 @@ unicode-linebreak = "0.1"
 fontdb = "0.23"
 fontdue = "0.9"
 rustybuzz = "0.20"
+ttf-parser = "0.25.1"
 
 [features]
 default = ["render"]
