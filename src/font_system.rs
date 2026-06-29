@@ -209,49 +209,45 @@ impl FontSystem {
     }
 
     /// Finds the best matching font for the given families, weight, and style.
-    ///
-    /// If none of the requested families are found, falls back to scanning
-    /// every loaded face's actual family names and returns the first match.
     pub fn query(
         &self,
         families: &[fontdb::Family],
         weight: FontWeight,
         style: FontStyle,
     ) -> Option<FontKey> {
+        let db_weight = fontdb::Weight(weight.0);
+        let db_style = match style {
+            FontStyle::Normal => fontdb::Style::Normal,
+            FontStyle::Italic => fontdb::Style::Italic,
+            FontStyle::Oblique => fontdb::Style::Oblique,
+        };
         let db_query = fontdb::Query {
             families,
-            weight: fontdb::Weight(weight.0),
-            style: match style {
-                FontStyle::Normal => fontdb::Style::Normal,
-                FontStyle::Italic => fontdb::Style::Italic,
-                FontStyle::Oblique => fontdb::Style::Oblique,
-            },
+            weight: db_weight,
+            style: db_style,
             ..Default::default()
         };
         if let Some(id) = self.db.query(&db_query) {
             return Some(FontKey(id));
         }
-        // Fallback: scan every face's actual family names
-        let candidates: Vec<String> = self
-            .db
-            .faces()
-            .flat_map(|face| face.families.iter().map(|(n, _)| n.clone()))
-            .filter(|n| !n.is_empty())
-            .collect();
-        for name in candidates {
-            let fam = fontdb::Family::Name(&name);
-            let q = fontdb::Query {
-                families: &[fam],
-                weight: fontdb::Weight(weight.0),
-                style: match style {
-                    FontStyle::Normal => fontdb::Style::Normal,
-                    FontStyle::Italic => fontdb::Style::Italic,
-                    FontStyle::Oblique => fontdb::Style::Oblique,
-                },
-                ..Default::default()
-            };
-            if let Some(id) = self.db.query(&q) {
-                return Some(FontKey(id));
+        // Fallback for generic families: when fontdb cannot classify any font
+        // (e.g. on systems without fontconfig), return the first font that
+        // matches the requested weight and style.
+        let is_generic = families.iter().any(|f| {
+            matches!(
+                f,
+                fontdb::Family::Serif
+                    | fontdb::Family::SansSerif
+                    | fontdb::Family::Monospace
+                    | fontdb::Family::Cursive
+                    | fontdb::Family::Fantasy
+            )
+        });
+        if is_generic {
+            for face in self.db.faces() {
+                if face.weight == db_weight && face.style == db_style {
+                    return Some(FontKey(face.id));
+                }
             }
         }
         None
@@ -260,6 +256,15 @@ impl FontSystem {
     /// Returns the keys of all currently loaded fonts.
     pub fn font_keys(&self) -> Vec<FontKey> {
         self.db.faces().map(|face| FontKey(face.id)).collect()
+    }
+
+    /// Returns the family name of the first available font face, if any.
+    pub fn first_font_family_name(&self) -> Option<&str> {
+        self.db
+            .faces()
+            .next()
+            .and_then(|face| face.families.first())
+            .map(|(name, _)| name.as_str())
     }
 
     /// Returns a `FontKey` for every face in the database, regardless of
