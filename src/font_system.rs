@@ -134,8 +134,8 @@ impl FontSystem {
     fn resolve_generic_families(db: &mut fontdb::Database) {
         let families: &[(&str, fn(&mut fontdb::Database, &str))] = &[
             ("sans-serif", |db, n| db.set_sans_serif_family(n)),
-            ("serif",       |db, n| db.set_serif_family(n)),
-            ("monospace",   |db, n| db.set_monospace_family(n)),
+            ("serif", |db, n| db.set_serif_family(n)),
+            ("monospace", |db, n| db.set_monospace_family(n)),
         ];
         for &(generic, setter) in families {
             if let Some((name, path)) = PlatformFallback::resolve_generic_family(generic) {
@@ -170,10 +170,7 @@ impl FontSystem {
     }
 
     /// Loads system fonts, then any user-supplied font sources.
-    fn load_fonts(
-        db: &mut fontdb::Database,
-        fonts: impl Iterator<Item = fontdb::Source>,
-    ) {
+    fn load_fonts(db: &mut fontdb::Database, fonts: impl Iterator<Item = fontdb::Source>) {
         db.load_system_fonts();
         for source in fonts {
             db.load_font_source(source);
@@ -420,11 +417,7 @@ impl FontSystem {
             // Collect face metadata first to avoid borrowing self.db and self
             // simultaneously when we later call self.get_font_data / get_or_create_face.
             let (face_idx, style, family) = match self.db.face(id) {
-                Some(f) => (
-                    f.index,
-                    f.style,
-                    f.families.first().map(|(n, _)| n.clone()),
-                ),
+                Some(f) => (f.index, f.style, f.families.first().map(|(n, _)| n.clone())),
                 None => continue,
             };
 
@@ -436,14 +429,18 @@ impl FontSystem {
                 } else {
                     let supported = if let Some(data) = self.get_font_data(key) {
                         if let Ok(ttfp) = rustybuzz::ttf_parser::Face::parse(data, face_idx) {
-                            ttfp.glyph_index(ch).map_or(false, |gid| gid != rustybuzz::ttf_parser::GlyphId(0))
+                            ttfp.glyph_index(ch)
+                                .map_or(false, |gid| gid != rustybuzz::ttf_parser::GlyphId(0))
                         } else {
                             false
                         }
                     } else {
                         false
                     };
-                    GLOBAL_CHAR_SUPPORT.lock().unwrap().insert(cache_key, supported);
+                    GLOBAL_CHAR_SUPPORT
+                        .lock()
+                        .unwrap()
+                        .insert(cache_key, supported);
                     supported
                 }
             };
@@ -492,7 +489,7 @@ impl FontSystem {
         if self.font_data.contains_key(&key.0) {
             return Some(self.font_data.get(&key.0).unwrap().as_slice());
         }
-        
+
         if let Some(data) = GLOBAL_FONT_DATA.lock().unwrap().get(&key.0).cloned() {
             self.font_data.insert(key.0, (*data).clone());
             return Some(self.font_data.get(&key.0).unwrap().as_slice());
@@ -501,11 +498,14 @@ impl FontSystem {
         let data = self
             .db
             .with_face_data(key.0, |font_data, _| font_data.to_vec())?;
-        
+
         let arc_data = Arc::new(data);
-        GLOBAL_FONT_DATA.lock().unwrap().insert(key.0, arc_data.clone());
+        GLOBAL_FONT_DATA
+            .lock()
+            .unwrap()
+            .insert(key.0, arc_data.clone());
         self.font_data.insert(key.0, (*arc_data).clone());
-        
+
         self.font_data.get(&key.0).map(|v| v.as_slice())
     }
 }

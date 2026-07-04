@@ -890,5 +890,3 @@ fn build_line_ranges(
 
     lines
 }
-
-
