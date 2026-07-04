@@ -115,15 +115,16 @@ impl RgbaImage {
                 let dst_b = self.data[dst_idx + 2] as u32;
                 let dst_a = self.data[dst_idx + 3] as u32;
 
-                // sRGB over: out = src * a/255 + dst * (1 - a/255)
-                // Pre-multiplied weights to avoid per-channel division.
+                // sRGB over (straight alpha):
+                // out_a = src_a + dst_a * (1 - src_a)
+                // out_color = (src_color * src_a + dst_color * dst_a * (1 - src_a)) / out_a
                 let out_a = dst_a + a - (dst_a * a) / 255;
                 if out_a == 0 {
                     continue;
                 }
-                let out_r = (src_r * a + dst_r * (255 - a)) / 255;
-                let out_g = (src_g * a + dst_g * (255 - a)) / 255;
-                let out_b = (src_b * a + dst_b * (255 - a)) / 255;
+                let out_r = (src_r * a * 255 + dst_r * dst_a * (255 - a)) / (out_a * 255);
+                let out_g = (src_g * a * 255 + dst_g * dst_a * (255 - a)) / (out_a * 255);
+                let out_b = (src_b * a * 255 + dst_b * dst_a * (255 - a)) / (out_a * 255);
 
                 self.data[dst_idx] = out_r as u8;
                 self.data[dst_idx + 1] = out_g as u8;

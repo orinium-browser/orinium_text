@@ -226,6 +226,35 @@ fn shape_with_fallback(
             );
         }
 
+        // Skip exact fonts whose face style is incompatible with the request.
+        // When Normal is requested, using an Italic/Oblique face causes the
+        // entire text to render slanted — the most common source of accidental
+        // italic body text.
+        let style_ok = font_system.db.face(font_key.0).map_or(false, |face| {
+            let compatible = match (style, face.style) {
+                (FontStyle::Normal, fontdb::Style::Normal) => true,
+                (FontStyle::Normal, _) => false,
+                (FontStyle::Italic, fontdb::Style::Normal) => false,
+                (FontStyle::Italic, _) => true,
+                (FontStyle::Oblique, fontdb::Style::Normal) => false,
+                (FontStyle::Oblique, _) => true,
+            };
+            compatible
+        });
+        if !style_ok {
+            return shape_with_fallback(
+                text,
+                run_start,
+                font_system,
+                weight,
+                style,
+                font_size,
+                &exact_fonts[1..],
+                families,
+                direction,
+            );
+        }
+
         return shape_with_font(
             text,
             run_start,
@@ -289,6 +318,39 @@ fn shape_with_fallback(
             },
             direction,
         );
+    }
+
+    // Phase 3: last resort — try any font in the database that covers the
+    // missing characters (platform-level fallback: fontconfig / CoreText /
+    // DirectWrite through fontdb).
+    for ch in text.chars() {
+        if let Some(font_key) = font_system.query_any_covering(ch) {
+            // Found a font covering this character; try shaping the entire
+            // text with it. If there are still .notdef glyphs they will be
+            // recursively handled by this same phase (but that font is now
+            // cached so query_any_covering won't return it again).
+            return shape_with_font(
+                text,
+                run_start,
+                font_key,
+                font_system,
+                font_size,
+                &mut |sub, offset, fs| {
+                    shape_with_fallback(
+                        sub,
+                        offset,
+                        fs,
+                        weight,
+                        style,
+                        font_size,
+                        exact_fonts,
+                        families,
+                        direction,
+                    )
+                },
+                direction,
+            );
+        }
     }
 
     Vec::new()
@@ -659,8 +721,8 @@ impl TextLayouter {
         }
 
         if ink_min_x != f32::MAX && ink_min_y != f32::MAX {
-            let offset_x = if ink_min_x < 0.0 { -ink_min_x } else { 0.0 };
-            let offset_y = if ink_min_y < 0.0 { -ink_min_y } else { 0.0 };
+            let offset_x = -ink_min_x;
+            let offset_y = -ink_min_y;
 
             for line in &mut all_lines {
                 line.x += offset_x;

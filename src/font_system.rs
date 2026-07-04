@@ -1,11 +1,32 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use fontdue::{Font, FontSettings};
 use rustybuzz::Face;
 
 use crate::layout::RasterizedGlyph;
 use crate::types::{FontKey, FontStyle, FontWeight};
+
+/// Global cache: character → (font_family_name, face_index).
+///
+/// Shared across [`FontSystem`] instances so font-fallback results from
+/// the measure phase are immediately available during buffer creation.
+static GLOBAL_CHAR_FONT: LazyLock<Mutex<HashMap<char, (String, u32)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Global cache: fontdb ID → font bytes.
+///
+/// Shares loaded font bytes across [`FontSystem`] instances (e.g. measurement
+/// and rendering) to prevent redundant disk reads and performance spikes.
+static GLOBAL_FONT_DATA: LazyLock<Mutex<HashMap<fontdb::ID, Arc<Vec<u8>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Global cache: (fontdb ID, character) → whether the font supports this character.
+///
+/// Shared across [`FontSystem`] instances to prevent repeated parsing of the same
+/// font face's cmap table for fallback lookups.
+static GLOBAL_CHAR_SUPPORT: LazyLock<Mutex<HashMap<(fontdb::ID, char), bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Cached glyph bitmap (alpha mask).
 struct CachedBitmap {
@@ -38,24 +59,105 @@ impl CachedFace {
     }
 }
 
+/// Specifies the platform-specific font fallback strategy.
+///
+/// On Linux, uses the `fontconfig` C library to resolve generic CSS font
+/// families (sans-serif, serif, monospace) to the user's actual system
+/// default fonts via `FcFontMatch`.
+///
+/// On other platforms this is a no-op and fontdb's own resolution (from
+/// fontconfig-XML parsing on Linux, or hardcoded defaults elsewhere) is
+/// used as the fallback.
+#[derive(Clone, Debug)]
+pub struct PlatformFallback;
+
+impl PlatformFallback {
+    /// Resolves a CSS generic family name (e.g. `"sans-serif"`) to the
+    /// system's actual default font family name and file path.
+    ///
+    /// Returns `None` when the platform cannot determine a default
+    /// (e.g. macOS/Windows — not yet implemented).
+    #[cfg(target_os = "linux")]
+    pub fn resolve_generic_family(generic: &str) -> Option<(String, std::path::PathBuf)> {
+        let fc = fontconfig::Fontconfig::new()?;
+        let font = fc.find(generic, None).ok()?;
+        Some((font.name, font.path))
+    }
+
+    /// Fallback for non-Linux platforms: no native API available yet.
+    #[cfg(not(target_os = "linux"))]
+    pub fn resolve_generic_family(_generic: &str) -> Option<(String, std::path::PathBuf)> {
+        None
+    }
+}
+
 /// Manages font discovery, loading, and data storage.
 ///
 /// Wraps a [`fontdb::Database`] and caches raw font data in memory so that
 /// shapers and rasterizers can access it as byte slices.
 pub struct FontSystem {
-    pub(crate) db: fontdb::Database,
+    pub db: fontdb::Database,
     pub(crate) font_data: HashMap<fontdb::ID, Vec<u8>>,
     pub(crate) parsed_fonts: HashMap<fontdb::ID, Font>,
     rasterized: HashMap<(fontdb::ID, u32, u32), RasterizedGlyph>,
     bitmap_cache: HashMap<(fontdb::ID, u32, u32), CachedBitmap>,
     face_cache: HashMap<fontdb::ID, CachedFace>,
+    /// Cache mapping characters to fonts that cover them.
+    /// Populated by `query_any_covering` on first use.
+    char_to_font: HashMap<char, FontKey>,
 }
 
 impl FontSystem {
     /// Loads system fonts automatically.
     pub fn new() -> Self {
+        Self::new_with_fonts(core::iter::empty())
+    }
+
+    /// Creates a `FontSystem` with the given fonts, plus system fonts.
+    ///
+    /// Each item is a [`fontdb::Source`] (e.g. `Source::File` or `Source::Binary`).
+    /// System fonts are loaded automatically before the supplied ones.
+    ///
+    /// Generic families (sans-serif, serif, monospace) are resolved by
+    /// first trying the OS-native font resolution API (fontconfig on Linux,
+    /// CoreText on macOS, DirectWrite on Windows), falling back to fontdb's
+    /// internal fontconfig-XML parsing.
+    pub fn new_with_fonts(fonts: impl IntoIterator<Item = fontdb::Source>) -> Self {
         let mut db = fontdb::Database::new();
-        db.load_system_fonts();
+        Self::load_fonts(&mut db, fonts.into_iter());
+        Self::resolve_generic_families(&mut db);
+        Self::new_with_locale_and_db_and_fallback(db, PlatformFallback)
+    }
+
+    /// Resolves generic CSS font families using OS-native API (B) with
+    /// fontdb's own resolution as fallback (A).
+    fn resolve_generic_families(db: &mut fontdb::Database) {
+        let families: &[(&str, fn(&mut fontdb::Database, &str))] = &[
+            ("sans-serif", |db, n| db.set_sans_serif_family(n)),
+            ("serif",       |db, n| db.set_serif_family(n)),
+            ("monospace",   |db, n| db.set_monospace_family(n)),
+        ];
+        for &(generic, setter) in families {
+            if let Some((name, path)) = PlatformFallback::resolve_generic_family(generic) {
+                if path.exists() {
+                    db.load_font_source(fontdb::Source::File(path));
+                }
+                setter(db, &name);
+            }
+            // If resolve_generic_family returns None, fontdb's own resolution
+            // (from fontconfig XML parsing in load_system_fonts) remains in
+            // place — this is the (A) fallback.
+        }
+    }
+
+    /// Builds a `FontSystem` from pre-configured parts.
+    ///
+    /// This is the lowest-level constructor — use [`new`](Self::new) or
+    /// [`new_with_fonts`](Self::new_with_fonts) for convenience.
+    pub fn new_with_locale_and_db_and_fallback(
+        db: fontdb::Database,
+        _fallback: PlatformFallback,
+    ) -> Self {
         Self {
             db,
             font_data: HashMap::new(),
@@ -63,30 +165,18 @@ impl FontSystem {
             rasterized: HashMap::new(),
             bitmap_cache: HashMap::new(),
             face_cache: HashMap::new(),
+            char_to_font: HashMap::new(),
         }
     }
 
-    /// Creates a `FontSystem` with only the specified font data (no system fonts).
-    ///
-    /// Each element of `fonts_data` is a `Vec<u8>` of raw font file bytes (e.g., TTF, OTF).
-    /// The data is cloned and stored internally.
-    pub fn new_with_fonts(fonts_data: Vec<Vec<u8>>) -> Self {
-        let mut db = fontdb::Database::new();
-        let mut font_data = HashMap::new();
-        for data in fonts_data {
-            let source = fontdb::Source::Binary(Arc::new(data.clone()));
-            let ids = db.load_font_source(source);
-            for id in ids {
-                font_data.insert(id, data.clone());
-            }
-        }
-        Self {
-            db,
-            font_data,
-            parsed_fonts: HashMap::new(),
-            rasterized: HashMap::new(),
-            bitmap_cache: HashMap::new(),
-            face_cache: HashMap::new(),
+    /// Loads system fonts, then any user-supplied font sources.
+    fn load_fonts(
+        db: &mut fontdb::Database,
+        fonts: impl Iterator<Item = fontdb::Source>,
+    ) {
+        db.load_system_fonts();
+        for source in fonts {
+            db.load_font_source(source);
         }
     }
 
@@ -123,7 +213,7 @@ impl FontSystem {
             return Some(&self.rasterized[&key]);
         }
         let font = self.get_or_parse_font(font_key)?;
-        let (metrics, _bitmap) = font.rasterize_indexed(glyph_id as u16, font_size);
+        let metrics = font.metrics_indexed(glyph_id as u16, font_size);
         let rasterized = RasterizedGlyph {
             width: metrics.width as u32,
             height: metrics.height as u32,
@@ -244,6 +334,13 @@ impl FontSystem {
             )
         });
         if is_generic {
+            // Prefer a Normal-style font over italic/oblique when the
+            // requested generic family has no matching font installed.
+            for face in self.db.faces() {
+                if face.style == fontdb::Style::Normal {
+                    return Some(FontKey(face.id));
+                }
+            }
             return self.db.faces().next().map(|f| FontKey(f.id));
         }
         None
@@ -269,6 +366,124 @@ impl FontSystem {
         self.db.faces().map(|face| FontKey(face.id)).collect()
     }
 
+    /// Find any loaded font that covers the given character.
+    ///
+    /// This is a last-resort fallback: iterates all faces in the database,
+    /// loads each font's data, checks via `ttf_parser::Face::glyph_index`
+    /// (reads the cmap table, no shaping), and returns the first face that
+    /// does NOT produce `.notdef` (glyph_id = 0).
+    ///
+    /// Results are cached:
+    ///   - locally in `char_to_font` for instantaneous repeat lookups;
+    ///   - globally in `GLOBAL_CHAR_FONT` so the same character never has to
+    ///     be resolved again in a different `FontSystem` instance
+    ///     (e.g. the platform text measurer and the GPU text renderer).
+    /// Faces already cached in `face_cache` are skipped on subsequent calls
+    /// since they were already tried through the normal fallback chain.
+    pub fn query_any_covering(&mut self, ch: char) -> Option<FontKey> {
+        // Fast path: return cached result if previously looked up.
+        if let Some(&key) = self.char_to_font.get(&ch) {
+            return Some(key);
+        }
+
+        // Global cache check: resolve by family name + face index.
+        if let Some((family_name, idx)) = GLOBAL_CHAR_FONT.lock().unwrap().get(&ch).cloned() {
+            for face_info in self.db.faces() {
+                if face_info.index == idx
+                    && face_info.families.iter().any(|(n, _)| *n == family_name)
+                {
+                    let key = FontKey(face_info.id);
+                    self.char_to_font.insert(ch, key);
+                    return Some(key);
+                }
+            }
+        }
+
+        let tried: std::collections::HashSet<fontdb::ID> =
+            self.face_cache.keys().copied().collect();
+
+        // Collect IDs first to avoid borrowing self.db and self simultaneously.
+        let untried_ids: Vec<fontdb::ID> = self
+            .db
+            .faces()
+            .map(|info| info.id)
+            .filter(|id| !tried.contains(id))
+            .collect();
+
+        // Prefer Normal-style faces as a last-resort fallback.
+        let mut fallback_key: Option<FontKey> = None;
+        let mut fallback_family: Option<(String, u32)> = None;
+
+        for &id in &untried_ids {
+            let key = FontKey(id);
+
+            // Collect face metadata first to avoid borrowing self.db and self
+            // simultaneously when we later call self.get_font_data / get_or_create_face.
+            let (face_idx, style, family) = match self.db.face(id) {
+                Some(f) => (
+                    f.index,
+                    f.style,
+                    f.families.first().map(|(n, _)| n.clone()),
+                ),
+                None => continue,
+            };
+
+            let has_valid_glyph = {
+                let cache_key = (id, ch);
+                let cached_val = GLOBAL_CHAR_SUPPORT.lock().unwrap().get(&cache_key).copied();
+                if let Some(supported) = cached_val {
+                    supported
+                } else {
+                    let supported = if let Some(data) = self.get_font_data(key) {
+                        if let Ok(ttfp) = rustybuzz::ttf_parser::Face::parse(data, face_idx) {
+                            ttfp.glyph_index(ch).map_or(false, |gid| gid != rustybuzz::ttf_parser::GlyphId(0))
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    GLOBAL_CHAR_SUPPORT.lock().unwrap().insert(cache_key, supported);
+                    supported
+                }
+            };
+
+            if !has_valid_glyph {
+                continue;
+            }
+
+            // Found a covering glyph. Create the full rustybuzz Face for
+            // later use, then cache and return.
+            if self.get_or_create_face(key).is_none() {
+                continue;
+            }
+
+            if style == fontdb::Style::Normal {
+                self.char_to_font.insert(ch, key);
+                if let Some(ref name) = family {
+                    GLOBAL_CHAR_FONT
+                        .lock()
+                        .unwrap()
+                        .insert(ch, (name.clone(), face_idx));
+                }
+                return Some(key);
+            }
+
+            if fallback_key.is_none() {
+                fallback_key = Some(key);
+                fallback_family = family.map(|name| (name, face_idx));
+            }
+        }
+
+        if let Some(key) = fallback_key {
+            self.char_to_font.insert(ch, key);
+            if let Some((name, idx)) = fallback_family {
+                GLOBAL_CHAR_FONT.lock().unwrap().insert(ch, (name, idx));
+            }
+        }
+        fallback_key
+    }
+
     /// Returns the raw font data for a given key.
     ///
     /// Data is loaded lazily from fontdb sources (file or binary) on first
@@ -277,10 +492,20 @@ impl FontSystem {
         if self.font_data.contains_key(&key.0) {
             return Some(self.font_data.get(&key.0).unwrap().as_slice());
         }
+        
+        if let Some(data) = GLOBAL_FONT_DATA.lock().unwrap().get(&key.0).cloned() {
+            self.font_data.insert(key.0, (*data).clone());
+            return Some(self.font_data.get(&key.0).unwrap().as_slice());
+        }
+
         let data = self
             .db
             .with_face_data(key.0, |font_data, _| font_data.to_vec())?;
-        self.font_data.insert(key.0, data);
+        
+        let arc_data = Arc::new(data);
+        GLOBAL_FONT_DATA.lock().unwrap().insert(key.0, arc_data.clone());
+        self.font_data.insert(key.0, (*arc_data).clone());
+        
         self.font_data.get(&key.0).map(|v| v.as_slice())
     }
 }

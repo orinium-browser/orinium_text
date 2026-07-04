@@ -11,7 +11,7 @@ pub mod types;
 #[cfg(feature = "render")]
 pub mod render;
 
-pub use font_system::FontSystem;
+pub use font_system::{FontSystem, PlatformFallback};
 pub use image::RgbaImage;
 pub use layout::{Fragment, RasterizedGlyph, ShapedText, TextLayouter};
 pub use types::*;

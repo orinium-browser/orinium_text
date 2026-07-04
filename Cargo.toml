@@ -9,8 +9,12 @@ unicode-bidi = "0.3"
 unicode-linebreak = "0.1"
 
 fontdb = "0.23"
+sys-locale = "0.3"
 fontdue = "0.9"
 rustybuzz = "0.20"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fontconfig = { version = "0.11", features = ["dlopen"] }
 
 [features]
 default = ["render"]
