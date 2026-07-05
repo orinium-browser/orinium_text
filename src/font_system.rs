@@ -91,6 +91,62 @@ impl PlatformFallback {
     }
 }
 
+/// If `data` is a TrueType Collection (starts with `ttcf`), extract the
+/// individual font at `face_index`. Otherwise return `data` unchanged.
+///
+/// fontdue does not support TTC files natively.  This function slces out the
+/// face at the given index and fixes up the table directory so that all table
+/// offsets are relative to the start of the extracted data rather than
+/// absolute within the original TTC file.
+fn extract_ttc_face(data: &[u8], face_index: u32) -> Option<Vec<u8>> {
+    if !data.starts_with(b"ttcf") {
+        return Some(data.to_vec());
+    }
+    if data.len() < 12 {
+        return None;
+    }
+    let num_fonts = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+    let idx = face_index as usize;
+    if idx >= num_fonts as usize {
+        return None;
+    }
+    let offset_pos = 12 + idx * 4;
+    if offset_pos + 4 > data.len() {
+        return None;
+    }
+    let ttc_offset = u32::from_be_bytes([
+        data[offset_pos],
+        data[offset_pos + 1],
+        data[offset_pos + 2],
+        data[offset_pos + 3],
+    ]) as usize;
+    let face_data = &data[ttc_offset..];
+
+    // Fix up table directory offsets: they're absolute within the TTC file,
+    // but need to be relative to the start of this face's data.
+    if face_data.len() < 6 {
+        return None;
+    }
+    let num_tables = u16::from_be_bytes([face_data[4], face_data[5]]) as usize;
+    let mut result = face_data.to_vec();
+    for i in 0..num_tables {
+        let rec_pos = 12 + i * 16 + 8; // +8 to skip tag(4) + checksum(4)
+        if rec_pos + 4 > result.len() {
+            break;
+        }
+        let old_off = u32::from_be_bytes([
+            result[rec_pos],
+            result[rec_pos + 1],
+            result[rec_pos + 2],
+            result[rec_pos + 3],
+        ]);
+        let new_off = old_off.checked_sub(ttc_offset as u32)?;
+        let bytes = new_off.to_be_bytes();
+        result[rec_pos..rec_pos + 4].copy_from_slice(&bytes);
+    }
+    Some(result)
+}
+
 /// Manages font discovery, loading, and data storage.
 ///
 /// Wraps a [`fontdb::Database`] and caches raw font data in memory so that
@@ -185,7 +241,9 @@ impl FontSystem {
             return Some(&self.parsed_fonts[&font_key.0]);
         }
         let data = self.get_font_data(font_key)?.to_vec();
-        let font = Font::from_bytes(data, FontSettings::default()).ok()?;
+        let face_index = self.db.face(font_key.0)?.index;
+        let face_data = extract_ttc_face(&data, face_index)?;
+        let font = Font::from_bytes(face_data, FontSettings::default()).ok()?;
         self.parsed_fonts.insert(font_key.0, font);
         Some(&self.parsed_fonts[&font_key.0])
     }

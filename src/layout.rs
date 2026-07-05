@@ -545,6 +545,20 @@ impl TextLayouter {
             };
         }
 
+        // Pre-warm fontdue font parsing for all unique fonts used by the
+        // shaped text, so the per-glyph loop never pays the one-time cost
+        // of fontdue::Font::from_bytes for unseen fonts.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for para in &shaped.paras {
+                for (run, _) in &para.shaped_runs {
+                    if seen.insert(run.font_key) {
+                        let _ = font_system.get_or_parse_font(run.font_key);
+                    }
+                }
+            }
+        }
+
         let line_height = style.font_size * style.line_height;
         let mut all_lines: Vec<LayoutLine> = Vec::new();
         let mut current_y = 0.0_f32;
