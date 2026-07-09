@@ -107,7 +107,7 @@ fn bench_cold_process_order(cases: &[BenchCase]) {
     println!("note: global caches may warm after the first case");
     println!(
         "{:<18} {:>10} {:>10} {:>10} {:>7} {:>7} {:>10}",
-        "case", "shape", "layout", "raster", "glyphs", "misses", "size"
+        "case", "shape", "layout", "raster", "glyphs", "slow_calls", "size"
     );
 
     for case in cases {
