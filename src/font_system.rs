@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -29,6 +30,28 @@ static GLOBAL_FONT_DATA: LazyLock<Mutex<HashMap<fontdb::ID, Arc<Vec<u8>>>>> =
 /// font face's cmap table for fallback lookups.
 static GLOBAL_CHAR_SUPPORT: LazyLock<Mutex<HashMap<(fontdb::ID, char), bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Global cache of parsed fontdue fonts.
+///
+/// This prevents repeated `fontdue::Font::from_bytes` calls when multiple
+/// `FontSystem` instances use the same font data and face index.
+static GLOBAL_PARSED_FONTS: LazyLock<Mutex<LruCache<ParsedFontCacheKey, Arc<Font>>>> =
+    LazyLock::new(|| {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(PARSED_FONTS_CAPACITY).unwrap(),
+        ))
+    });
+
+/// Cache key for a parsed fontdue font.
+///
+/// `fontdb::ID` is local to each `fontdb::Database`, so the key is derived
+/// from the actual font bytes and TTC face index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ParsedFontCacheKey {
+    len: usize,
+    hash: u64,
+    face_index: u32,
+}
 
 /// Cached glyph bitmap (alpha mask).
 struct CachedBitmap {
@@ -396,33 +419,24 @@ impl FontSystem {
             return Some(font.clone());
         }
 
-        let total_start = std::time::Instant::now();
-
-        let data_start = std::time::Instant::now();
         let data = self.get_font_data(font_key)?;
-        let data_elapsed = data_start.elapsed();
-
         let face_index = self.db.face(font_key.0)?.index;
+        let cache_key = parsed_font_cache_key(data.as_slice(), face_index);
 
-        let extract_start = std::time::Instant::now();
+        if let Some(font) = GLOBAL_PARSED_FONTS.lock().unwrap().get(&cache_key).cloned() {
+            self.parsed_fonts.push(font_key.0, font.clone());
+            return Some(font);
+        }
+
         let face_data = extract_ttc_face(data.as_slice(), face_index)?;
-        let extract_elapsed = extract_start.elapsed();
-
-        let parse_start = std::time::Instant::now();
         let font = Font::from_bytes(face_data, FontSettings::default()).ok()?;
-        let parse_elapsed = parse_start.elapsed();
-
-        println!(
-            "fontdue parse: id={:?} face_index={} data={:?} extract={:?} parse={:?} total={:?}",
-            font_key.0,
-            face_index,
-            data_elapsed,
-            extract_elapsed,
-            parse_elapsed,
-            total_start.elapsed(),
-        );
-
         let font = Arc::new(font);
+
+        GLOBAL_PARSED_FONTS
+            .lock()
+            .unwrap()
+            .push(cache_key, font.clone());
+
         self.parsed_fonts.push(font_key.0, font.clone());
         Some(font)
     }
@@ -809,5 +823,16 @@ mod tests {
         let b = FontSystem::default();
         assert!(a.db.len() > 0);
         assert_eq!(a.db.len(), b.db.len());
+    }
+}
+
+fn parsed_font_cache_key(data: &[u8], face_index: u32) -> ParsedFontCacheKey {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+
+    ParsedFontCacheKey {
+        len: data.len(),
+        hash: hasher.finish(),
+        face_index,
     }
 }
