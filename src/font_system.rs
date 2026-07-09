@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use fontdue::{Font, FontSettings};
+use lru::LruCache;
 use rustybuzz::Face;
 
 use crate::layout::RasterizedGlyph;
@@ -36,19 +38,18 @@ struct CachedBitmap {
 
 /// Keeps font bytes alive while caching a parsed `rustybuzz::Face`.
 ///
-/// `Face` borrows the underlying font data. This struct bundles them
-/// together so that when the struct moves (e.g. inside a `HashMap`) the
-/// heap‑allocated byte buffer stays at the same address.
+/// Shares font data via `Arc` to avoid redundant copies across the
+/// `font_data` instance map and the global font-data cache.
 struct CachedFace {
-    _data: Vec<u8>,
+    _data: Arc<Vec<u8>>,
     face: Face<'static>,
 }
 
 impl CachedFace {
-    fn new(data: Vec<u8>, index: u32) -> Option<Self> {
+    fn new(data: Arc<Vec<u8>>, index: u32) -> Option<Self> {
         let face = Face::from_slice(&data, index)?;
         // Safety: `face` borrows from `data`, which is moved into the same
-        // struct.  The `Vec`'s heap buffer address is stable across moves,
+        // struct.  The `Arc`'s heap buffer address is stable across moves,
         // so the reference remains valid for as long as `CachedFace` lives.
         let face = unsafe { std::mem::transmute::<Face<'_>, Face<'static>>(face) };
         Some(CachedFace { _data: data, face })
@@ -63,7 +64,13 @@ impl CachedFace {
 ///
 /// On Linux, uses the `fontconfig` C library to resolve generic CSS font
 /// families (sans-serif, serif, monospace) to the user's actual system
-/// default fonts via `FcFontMatch`.
+/// default fonts via `FcFontMatch`, and to find the best font covering a
+/// given character via `FcFontMatch` with a `CharSet`.
+///
+/// On Windows, uses DirectWrite (`IDWriteFontFallback::MapCharacters`) to
+/// find the system-defined fallback font for a given character based on
+/// the configured cascade list (e.g. Meiryo for Japanese, Nirmala UI for
+/// Indic scripts, etc.).
 ///
 /// On other platforms this is a no-op and fontdb's own resolution (from
 /// fontconfig-XML parsing on Linux, or hardcoded defaults elsewhere) is
@@ -74,19 +81,160 @@ pub struct PlatformFallback;
 impl PlatformFallback {
     /// Resolves a CSS generic family name (e.g. `"sans-serif"`) to the
     /// system's actual default font family name and file path.
-    ///
-    /// Returns `None` when the platform cannot determine a default
-    /// (e.g. macOS/Windows — not yet implemented).
-    #[cfg(target_os = "linux")]
     pub fn resolve_generic_family(generic: &str) -> Option<(String, std::path::PathBuf)> {
-        let fc = fontconfig::Fontconfig::new()?;
+        let result = imp::resolve_generic_family(generic);
+        log::debug!(target: "orinium_text::platform", "resolve_generic_family({generic}) = {result:?}");
+        result
+    }
+
+    /// Queries the OS-native font subsystem for the best font that covers
+    /// `ch` and has a style compatible with the requested `weight`/`style`.
+    ///
+    /// Returns `(family_name, face_index)` on success.
+    ///
+    /// On Linux this uses fontconfig's `FcFontMatch` with a `CharSet`
+    /// containing `ch`.  On Windows it uses DirectWrite's
+    /// `IDWriteFontFallback::MapCharacters`.  Both APIs take the system
+    /// font configuration into account, providing proper script-specific
+    /// fallback (e.g. Meiryo on Windows, Noto Sans CJK on Linux).
+    pub fn query_covering(
+        ch: char,
+        families: &[fontdb::Family],
+        weight: FontWeight,
+        style: FontStyle,
+    ) -> Option<(String, u32)> {
+        let result = imp::query_covering(ch, families, weight, style);
+        if let Some((ref name, _)) = result {
+            log::info!(target: "orinium_text::platform", "font fallback for U+{:04X} ({ch}) → {name}", ch as u32);
+        } else {
+            log::trace!(target: "orinium_text::platform", "no platform fallback for U+{:04X} ({ch})", ch as u32);
+        }
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Platform-specific implementations
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use fontconfig::{CharSet, Fontconfig, Pattern};
+    use std::path::PathBuf;
+
+    pub fn resolve_generic_family(generic: &str) -> Option<(String, PathBuf)> {
+        let fc = Fontconfig::new()?;
         let font = fc.find(generic, None).ok()?;
         Some((font.name, font.path))
     }
 
-    /// Fallback for non-Linux platforms: no native API available yet.
-    #[cfg(not(target_os = "linux"))]
-    pub fn resolve_generic_family(_generic: &str) -> Option<(String, std::path::PathBuf)> {
+    pub fn query_covering(
+        ch: char,
+        _families: &[fontdb::Family],
+        _weight: crate::types::FontWeight,
+        _style: crate::types::FontStyle,
+    ) -> Option<(String, u32)> {
+        let fc = Fontconfig::new()?;
+        let mut pat = Pattern::new(&fc).ok()?;
+        let mut charset = CharSet::new(&fc).ok()?;
+        charset.add_char(ch).ok()?;
+        pat.add_charset(charset).ok()?;
+        let matched = pat.font_match().ok()?;
+        let name = matched.name().ok()?.to_owned();
+        let index = matched.face_index().unwrap_or(0) as u32;
+        Some((name, index))
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod imp {
+    use std::borrow::Cow;
+    use std::path::PathBuf;
+    use winapi::um::dwrite::DWRITE_READING_DIRECTION_LEFT_TO_RIGHT;
+
+    struct Source(String);
+    impl dwrote::TextAnalysisSourceMethods for Source {
+        fn get_locale_name(&self, _: u32) -> (Cow<'_, str>, u32) {
+            (Cow::Borrowed(&self.0), u32::MAX)
+        }
+        fn get_paragraph_reading_direction(&self) -> i32 {
+            DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
+        }
+    }
+
+    pub fn resolve_generic_family(_generic: &str) -> Option<(String, PathBuf)> {
+        None
+    }
+
+    pub fn query_covering(
+        ch: char,
+        families: &[fontdb::Family],
+        weight: crate::types::FontWeight,
+        style: crate::types::FontStyle,
+    ) -> Option<(String, u32)> {
+        let fallback = dwrote::FontFallback::get_system_fallback()?;
+        let collection = dwrote::FontCollection::system();
+
+        let utf16: Vec<u16> = ch.encode_utf16().collect();
+        let source = dwrote::TextAnalysisSource::from_text(
+            Box::new(Source(String::new())),
+            Cow::Owned(utf16.clone()),
+        );
+
+        let dw_weight = match weight.0 {
+            0..=49 => dwrote::FontWeight::Thin,
+            50..=99 => dwrote::FontWeight::ExtraLight,
+            100..=199 => dwrote::FontWeight::Light,
+            200..=299 => dwrote::FontWeight::SemiLight,
+            300..=399 => dwrote::FontWeight::Regular,
+            400..=499 => dwrote::FontWeight::Medium,
+            500..=599 => dwrote::FontWeight::SemiBold,
+            600..=699 => dwrote::FontWeight::Bold,
+            700..=799 => dwrote::FontWeight::ExtraBold,
+            800..=899 => dwrote::FontWeight::Black,
+            _ => dwrote::FontWeight::ExtraBlack,
+        };
+        let dw_style = match style {
+            crate::types::FontStyle::Normal => dwrote::FontStyle::Normal,
+            crate::types::FontStyle::Italic => dwrote::FontStyle::Italic,
+            crate::types::FontStyle::Oblique => dwrote::FontStyle::Oblique,
+        };
+
+        let base_family = families.first().and_then(|f| match f {
+            fontdb::Family::Name(name) => Some(name.as_ref()),
+            _ => None,
+        });
+        let base_family_str = base_family.map(|s| s.to_owned());
+
+        let result = fallback.map_characters(
+            &source,
+            0,
+            utf16.len() as u32,
+            &collection,
+            base_family_str.as_deref(),
+            dw_weight,
+            dw_style,
+            dwrote::FontStretch::Normal,
+        );
+
+        result.mapped_font.map(|font| (font.family_name(), 0))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+mod imp {
+    use std::path::PathBuf;
+
+    pub fn resolve_generic_family(_generic: &str) -> Option<(String, PathBuf)> {
+        None
+    }
+
+    pub fn query_covering(
+        _ch: char,
+        _families: &[fontdb::Family],
+        _weight: crate::types::FontWeight,
+        _style: crate::types::FontStyle,
+    ) -> Option<(String, u32)> {
         None
     }
 }
@@ -147,16 +295,21 @@ fn extract_ttc_face(data: &[u8], face_index: u32) -> Option<Vec<u8>> {
     Some(result)
 }
 
+const BITMAP_CACHE_CAPACITY: usize = 5000;
+const PARSED_FONTS_CAPACITY: usize = 64;
+
 /// Manages font discovery, loading, and data storage.
 ///
 /// Wraps a [`fontdb::Database`] and caches raw font data in memory so that
 /// shapers and rasterizers can access it as byte slices.
+///
+/// Font data is stored as `Arc<Vec<u8>>` and shared across all caches
+/// (`font_data`, `CachedFace`) to avoid redundant copies.
 pub struct FontSystem {
     pub db: fontdb::Database,
-    pub(crate) font_data: HashMap<fontdb::ID, Vec<u8>>,
-    pub(crate) parsed_fonts: HashMap<fontdb::ID, Font>,
-    rasterized: HashMap<(fontdb::ID, u32, u32), RasterizedGlyph>,
-    bitmap_cache: HashMap<(fontdb::ID, u32, u32), CachedBitmap>,
+    pub(crate) font_data: HashMap<fontdb::ID, Arc<Vec<u8>>>,
+    pub(crate) parsed_fonts: LruCache<fontdb::ID, Arc<Font>>,
+    bitmap_cache: LruCache<(fontdb::ID, u32, u32), CachedBitmap>,
     face_cache: HashMap<fontdb::ID, CachedFace>,
     /// Cache mapping characters to fonts that cover them.
     /// Populated by `query_any_covering` on first use.
@@ -217,9 +370,8 @@ impl FontSystem {
         Self {
             db,
             font_data: HashMap::new(),
-            parsed_fonts: HashMap::new(),
-            rasterized: HashMap::new(),
-            bitmap_cache: HashMap::new(),
+            parsed_fonts: LruCache::new(NonZeroUsize::new(PARSED_FONTS_CAPACITY).unwrap()),
+            bitmap_cache: LruCache::new(NonZeroUsize::new(BITMAP_CACHE_CAPACITY).unwrap()),
             face_cache: HashMap::new(),
             char_to_font: HashMap::new(),
         }
@@ -236,59 +388,75 @@ impl FontSystem {
     /// Returns a parsed [`Font`] for the given `font_key`, parsing and caching
     /// the font on first access. The parsed font is reused across all subsequent
     /// calls, avoiding repeated parsing of the same font file.
-    pub fn get_or_parse_font(&mut self, font_key: FontKey) -> Option<&Font> {
-        if self.parsed_fonts.contains_key(&font_key.0) {
-            return Some(&self.parsed_fonts[&font_key.0]);
+    ///
+    /// Returns an `Arc` so the caller can hold a reference after the LRU cache
+    /// potentially evicts the entry.
+    pub fn get_or_parse_font(&mut self, font_key: FontKey) -> Option<Arc<Font>> {
+        if let Some(font) = self.parsed_fonts.get(&font_key.0) {
+            return Some(font.clone());
         }
-        let data = self.get_font_data(font_key)?.to_vec();
+        let data = self.get_font_data(font_key)?;
         let face_index = self.db.face(font_key.0)?.index;
         let face_data = extract_ttc_face(&data, face_index)?;
         let font = Font::from_bytes(face_data, FontSettings::default()).ok()?;
-        self.parsed_fonts.insert(font_key.0, font);
-        Some(&self.parsed_fonts[&font_key.0])
+        let font = Arc::new(font);
+        self.parsed_fonts.push(font_key.0, font.clone());
+        Some(font)
     }
 
-    /// Returns rasterized metrics for the given glyph, caching the result so
-    /// the same glyph at the same font size is never rasterized twice.
-    /// The font is looked up internally via [`get_or_parse_font`].
-    pub(crate) fn get_or_rasterize(
+    /// Returns glyph dimensions (width, height, bearing_x, bearing_y) in
+    /// pixels using `ttf_parser` for fast, lazy parsing.
+    ///
+    /// Unlike fontdue's `get_or_parse_font` + `metrics_indexed` (which may
+    /// trigger expensive fontdue parsing of all glyph outlines), this uses
+    /// parsing of the entire font, this uses `ttf_parser::Face::parse`
+    /// which only validates the table directory and reads per-glyph data
+    /// on demand.  Ideal for layout passes that don't need bitmaps.
+    pub(crate) fn get_glyph_dimensions(
         &mut self,
         font_key: FontKey,
         glyph_id: u32,
         font_size: f32,
-    ) -> Option<&RasterizedGlyph> {
-        let size_bits = font_size.to_bits();
-        let key = (font_key.0, glyph_id, size_bits);
-        if self.rasterized.contains_key(&key) {
-            return Some(&self.rasterized[&key]);
+    ) -> Option<(f32, f32, f32, f32)> {
+        let data = self.get_font_data(font_key)?;
+        let face_info = self.db.face(font_key.0)?;
+        let face_data = extract_ttc_face(&data, face_info.index)?;
+        let face = rustybuzz::ttf_parser::Face::parse(&face_data, 0).ok()?;
+        let upem = face.units_per_em() as f32;
+        let scale = font_size / upem;
+        if let Some(bbox) = face
+            .glyph_bounding_box(rustybuzz::ttf_parser::GlyphId(glyph_id as u16))
+        {
+            Some((
+                (bbox.x_max - bbox.x_min) as f32 * scale,
+                (bbox.y_max - bbox.y_min) as f32 * scale,
+                bbox.x_min as f32 * scale,
+                bbox.y_max as f32 * scale,
+            ))
+        } else if let Some(advance) = face
+            .glyph_hor_advance(rustybuzz::ttf_parser::GlyphId(glyph_id as u16))
+        {
+            Some((
+                advance as f32 * scale,
+                0.0,
+                0.0,
+                0.0,
+            ))
+        } else {
+            None
         }
-        // Reuse bitmap cache if already populated (e.g. by render_text).
-        if let Some(cached) = self.bitmap_cache.get(&key) {
-            self.rasterized.insert(key, cached.metrics.clone());
-            return Some(&self.rasterized[&key]);
-        }
-        let font = self.get_or_parse_font(font_key)?;
-        let metrics = font.metrics_indexed(glyph_id as u16, font_size);
-        let rasterized = RasterizedGlyph {
-            width: metrics.width as u32,
-            height: metrics.height as u32,
-            bearing_x: metrics.xmin,
-            bearing_y: metrics.ymin + metrics.height as i32,
-        };
-        self.rasterized.insert(key, rasterized);
-        Some(&self.rasterized[&key])
     }
 
     /// Returns rasterized metrics AND the alpha-mask bitmap for the given
     /// glyph, caching both so the same glyph at the same font size is never
     /// rasterized twice.
     ///
-    /// Unlike [`get_or_rasterize`] (which returns a borrowed reference), this
-    /// returns owned data so it can be used without fighting the borrow
-    /// checker when also mutating `self` (e.g. rasterizing more glyphs).
+    /// Unlike the bitmap-free `get_glyph_dimensions` (which uses
+    /// `ttf_parser` for fast lazy parsing), this calls fontdue to produce
+    /// alpha masks — expensive for large CJK fonts.
     ///
-    /// This is the rendering counterpart of [`get_or_rasterize`], which only
-    /// caches metrics.
+    /// This is the rendering counterpart of `get_glyph_dimensions`, which
+    /// only caches metrics.
     pub fn get_or_rasterize_with_bitmap(
         &mut self,
         font_key: FontKey,
@@ -308,19 +476,14 @@ impl FontSystem {
             bearing_x: metrics.xmin,
             bearing_y: metrics.ymin + metrics.height as i32,
         };
-        self.bitmap_cache.insert(
+        self.bitmap_cache.push(
             key,
             CachedBitmap {
-                metrics: rasterized,
-                alpha_mask,
+                metrics: rasterized.clone(),
+                alpha_mask: alpha_mask.clone(),
             },
         );
-        // Also populate the metrics-only cache so callers that only
-        // need metrics (layout) never rasterize again.
-        self.rasterized
-            .insert(key, self.bitmap_cache[&key].metrics.clone());
-        let cached = &self.bitmap_cache[&key];
-        Some((cached.metrics.clone(), cached.alpha_mask.clone()))
+        Some((rasterized, alpha_mask))
     }
 
     /// Returns a cached `rustybuzz::Face` for the given font, creating and
@@ -328,7 +491,7 @@ impl FontSystem {
     /// calls, avoiding repeated parsing of the font file tables.
     pub(crate) fn get_or_create_face(&mut self, key: FontKey) -> Option<&Face<'_>> {
         if !self.face_cache.contains_key(&key.0) {
-            let data = self.get_font_data(key)?.to_vec();
+            let data = self.get_font_data(key)?;
 
             let face_info = self.db.face(key.0)?;
             let cached = CachedFace::new(data, face_info.index)?;
@@ -340,14 +503,15 @@ impl FontSystem {
 
     /// Loads a font from raw byte data and returns the assigned keys.
     ///
-    /// The data is cloned and stored internally so it remains available for
-    /// shaping and rasterization.
+    /// The data is shared via `Arc` so multiple faces from the same source
+    /// reuse the same heap allocation.
     pub fn load_font_data(&mut self, data: Vec<u8>) -> Vec<FontKey> {
-        let source = fontdb::Source::Binary(Arc::new(data.clone()));
+        let arc = Arc::new(data);
+        let source = fontdb::Source::Binary(arc.clone());
         let ids = self.db.load_font_source(source);
         ids.iter()
             .map(|id| {
-                self.font_data.insert(*id, data.clone());
+                self.font_data.insert(*id, arc.clone());
                 FontKey(*id)
             })
             .collect()
@@ -436,13 +600,14 @@ impl FontSystem {
     /// Faces already cached in `face_cache` are skipped on subsequent calls
     /// since they were already tried through the normal fallback chain.
     pub fn query_any_covering(&mut self, ch: char) -> Option<FontKey> {
-        // Fast path: return cached result if previously looked up.
         if let Some(&key) = self.char_to_font.get(&ch) {
+            log::debug!(target: "orinium_text::query_any", "U+{:04X} local-cache hit → {:?}", ch as u32, key);
             return Some(key);
         }
 
         // Global cache check: resolve by family name + face index.
         if let Some((family_name, idx)) = GLOBAL_CHAR_FONT.lock().unwrap().get(&ch).cloned() {
+            log::debug!(target: "orinium_text::query_any", "U+{:04X} global-cache hit → {family_name} idx={idx}", ch as u32);
             for face_info in self.db.faces() {
                 if face_info.index == idx
                     && face_info.families.iter().any(|(n, _)| *n == family_name)
@@ -452,6 +617,39 @@ impl FontSystem {
                     return Some(key);
                 }
             }
+        }
+
+        // Try the OS-native font fallback API before falling back to
+        // iterating every font in the database.  This gives correct
+        // script-specific results (e.g. Meiryo on Windows for CJK,
+        // Noto Sans Arabic on Linux for Arabic).
+        log::debug!(target: "orinium_text::query_any", "U+{:04X} trying platform fallback", ch as u32);
+        if let Some((family_name, idx)) = PlatformFallback::query_covering(
+            ch,
+            &[],
+            crate::types::FontWeight(400),
+            crate::types::FontStyle::Normal,
+        ) {
+            let candidate_ids: Vec<fontdb::ID> = self
+                .db
+                .faces()
+                .filter(|f| f.index == idx && f.families.iter().any(|(n, _)| *n == family_name))
+                .map(|f| f.id)
+                .collect();
+            for &id in &candidate_ids {
+                let key = FontKey(id);
+                if self.get_or_create_face(key).is_some() {
+                    log::debug!(target: "orinium_text::query_any", "U+{:04X} platform fallback succeeded → {family_name} key={key:?}", ch as u32);
+                    self.char_to_font.insert(ch, key);
+                    GLOBAL_CHAR_FONT
+                        .lock()
+                        .unwrap()
+                        .insert(ch, (family_name.clone(), idx));
+                    return Some(key);
+                }
+            }
+        } else {
+            log::trace!(target: "orinium_text::query_any", "U+{:04X} platform fallback returned nothing", ch as u32);
         }
 
         let tried: std::collections::HashSet<fontdb::ID> =
@@ -486,7 +684,7 @@ impl FontSystem {
                     supported
                 } else {
                     let supported = if let Some(data) = self.get_font_data(key) {
-                        if let Ok(ttfp) = rustybuzz::ttf_parser::Face::parse(data, face_idx) {
+                        if let Ok(ttfp) = rustybuzz::ttf_parser::Face::parse(&data, face_idx) {
                             ttfp.glyph_index(ch)
                                 .map_or(false, |gid| gid != rustybuzz::ttf_parser::GlyphId(0))
                         } else {
@@ -513,6 +711,8 @@ impl FontSystem {
                 continue;
             }
 
+            log::trace!(target: "orinium_text::query_any", "U+{:04X} scanning → id={id:?} family={family:?} style={style:?}", ch as u32);
+
             if style == fontdb::Style::Normal {
                 self.char_to_font.insert(ch, key);
                 if let Some(ref name) = family {
@@ -535,6 +735,8 @@ impl FontSystem {
             if let Some((name, idx)) = fallback_family {
                 GLOBAL_CHAR_FONT.lock().unwrap().insert(ch, (name, idx));
             }
+        } else {
+            log::warn!(target: "orinium_text::query_any", "U+{:04X} ({ch}) — no font found in entire system", ch as u32);
         }
         fallback_key
     }
@@ -542,15 +744,15 @@ impl FontSystem {
     /// Returns the raw font data for a given key.
     ///
     /// Data is loaded lazily from fontdb sources (file or binary) on first
-    /// access and cached in memory for subsequent calls.
-    pub fn get_font_data(&mut self, key: FontKey) -> Option<&[u8]> {
-        if self.font_data.contains_key(&key.0) {
-            return Some(self.font_data.get(&key.0).unwrap().as_slice());
+    /// access and cached (shared via `Arc`) for subsequent calls.
+    pub fn get_font_data(&mut self, key: FontKey) -> Option<Arc<Vec<u8>>> {
+        if let Some(data) = self.font_data.get(&key.0) {
+            return Some(data.clone());
         }
 
         if let Some(data) = GLOBAL_FONT_DATA.lock().unwrap().get(&key.0).cloned() {
-            self.font_data.insert(key.0, (*data).clone());
-            return Some(self.font_data.get(&key.0).unwrap().as_slice());
+            self.font_data.insert(key.0, data.clone());
+            return Some(data);
         }
 
         let data = self
@@ -562,9 +764,9 @@ impl FontSystem {
             .lock()
             .unwrap()
             .insert(key.0, arc_data.clone());
-        self.font_data.insert(key.0, (*arc_data).clone());
+        self.font_data.insert(key.0, arc_data.clone());
 
-        self.font_data.get(&key.0).map(|v| v.as_slice())
+        Some(arc_data)
     }
 }
 

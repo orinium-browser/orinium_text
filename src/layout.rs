@@ -4,7 +4,8 @@ use unicode_linebreak::linebreaks;
 
 use crate::FontSystem;
 use crate::types::{
-    BidiMode, FontKey, FontStyle, FontWeight, LayoutGlyph, LayoutLine, TextLayout, TextStyle,
+    BidiMode, FontKey, FontStyle, FontVariant, FontWeight, LayoutGlyph, LayoutLine, TextLayout,
+    TextStyle,
 };
 
 #[derive(Debug, Clone)]
@@ -22,6 +23,9 @@ pub(crate) struct ShapedRun {
     glyphs: Vec<GlyphPosition>,
     font_key: FontKey,
     direction: Direction,
+    /// Effective font size used for shaping (variant-adjusted).
+    pub(crate) font_size: f32,
+    pub(crate) variant: FontVariant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +47,20 @@ pub struct RasterizedGlyph {
     pub height: u32,
     pub bearing_x: i32,
     pub bearing_y: i32,
+}
+
+/// Intermediate layout data for a single glyph during line positioning.
+struct GlyphLayoutData {
+    glyph_id: u32,
+    w: f32,
+    h: f32,
+    bx: f32,
+    by: f32,
+    x_advance: f32,
+    x_offset: f32,
+    y_offset: f32,
+    font_key: FontKey,
+    font_size: f32,
 }
 
 fn shape_text(face: &Face, text: &str, font_size: f32, direction: Direction) -> Vec<GlyphPosition> {
@@ -131,12 +149,15 @@ fn shape_with_font(
     font_key: FontKey,
     font_system: &mut FontSystem,
     font_size: f32,
+    variant: FontVariant,
     try_next: &mut dyn FnMut(&str, usize, &mut FontSystem) -> Vec<ShapedRun>,
     direction: Direction,
 ) -> Vec<ShapedRun> {
     if text.is_empty() {
         return Vec::new();
     }
+
+    let baseline_shift = variant.baseline_shift() * font_size;
 
     // Scoped so the `face` borrow from font_system is released before
     // any `try_next` call (which also needs font_system).
@@ -146,15 +167,20 @@ fn shape_with_font(
     };
     let has_notdef = glyphs.iter().any(|g| g.glyph_id == 0);
 
+    log::trace!(target: "orinium_text::fallback", "shape_with_font key={font_key:?} has_notdef={has_notdef}");
+
     if !has_notdef {
         let mut adjusted = glyphs;
         for g in &mut adjusted {
             g.cluster += run_start as u32;
+            g.y_offset += baseline_shift;
         }
         return vec![ShapedRun {
             glyphs: adjusted,
             font_key,
             direction,
+            font_size,
+            variant,
         }];
     }
 
@@ -176,11 +202,14 @@ fn shape_with_font(
             let mut adjusted = sub_glyphs;
             for g in &mut adjusted {
                 g.cluster += (run_start + start) as u32;
+                g.y_offset += baseline_shift;
             }
             result.push(ShapedRun {
                 glyphs: adjusted,
                 font_key,
                 direction,
+                font_size,
+                variant,
             });
         } else {
             let fallback = try_next(sub_text, run_start + start, font_system);
@@ -201,6 +230,7 @@ fn shape_with_fallback(
     weight: FontWeight,
     style: FontStyle,
     font_size: f32,
+    variant: FontVariant,
     exact_fonts: &[FontKey],
     families: &[fontdb::Family],
     direction: Direction,
@@ -209,20 +239,17 @@ fn shape_with_fallback(
         return Vec::new();
     }
 
+    log::trace!(target: "orinium_text::fallback", "shape_with_fallback text={text:?} exact_fonts={exact_fonts:?} families={families:?}");
+
+    let eff_font_size = font_size * variant.scale();
+
     // Phase 1: try exact fonts by FontKey (no family-name query)
     if !exact_fonts.is_empty() {
         let font_key = exact_fonts[0];
         if font_system.get_font_data(font_key).is_none() {
             return shape_with_fallback(
-                text,
-                run_start,
-                font_system,
-                weight,
-                style,
-                font_size,
-                &exact_fonts[1..],
-                families,
-                direction,
+                text, run_start, font_system, weight, style, font_size, variant,
+                &exact_fonts[1..], families, direction,
             );
         }
 
@@ -243,35 +270,18 @@ fn shape_with_fallback(
         });
         if !style_ok {
             return shape_with_fallback(
-                text,
-                run_start,
-                font_system,
-                weight,
-                style,
-                font_size,
-                &exact_fonts[1..],
-                families,
-                direction,
+                text, run_start, font_system, weight, style, font_size, variant,
+                &exact_fonts[1..], families, direction,
             );
         }
 
         return shape_with_font(
-            text,
-            run_start,
-            font_key,
-            font_system,
-            font_size,
+            text, run_start, font_key, font_system,
+            eff_font_size, variant,
             &mut |sub, offset, fs| {
                 shape_with_fallback(
-                    sub,
-                    offset,
-                    fs,
-                    weight,
-                    style,
-                    font_size,
-                    &exact_fonts[1..],
-                    families,
-                    direction,
+                    sub, offset, fs, weight, style, font_size, variant,
+                    &exact_fonts[1..], families, direction,
                 )
             },
             direction,
@@ -284,36 +294,19 @@ fn shape_with_fallback(
             Some(key) => key,
             None => {
                 return shape_with_fallback(
-                    text,
-                    run_start,
-                    font_system,
-                    weight,
-                    style,
-                    font_size,
-                    exact_fonts,
-                    &families[1..],
-                    direction,
+                    text, run_start, font_system, weight, style, font_size, variant,
+                    exact_fonts, &families[1..], direction,
                 );
             }
         };
 
         return shape_with_font(
-            text,
-            run_start,
-            font_key,
-            font_system,
-            font_size,
+            text, run_start, font_key, font_system,
+            eff_font_size, variant,
             &mut |sub, offset, fs| {
                 shape_with_fallback(
-                    sub,
-                    offset,
-                    fs,
-                    weight,
-                    style,
-                    font_size,
-                    exact_fonts,
-                    &families[1..],
-                    direction,
+                    sub, offset, fs, weight, style, font_size, variant,
+                    exact_fonts, &families[1..], direction,
                 )
             },
             direction,
@@ -330,22 +323,12 @@ fn shape_with_fallback(
             // recursively handled by this same phase (but that font is now
             // cached so query_any_covering won't return it again).
             return shape_with_font(
-                text,
-                run_start,
-                font_key,
-                font_system,
-                font_size,
+                text, run_start, font_key, font_system,
+                eff_font_size, variant,
                 &mut |sub, offset, fs| {
                     shape_with_fallback(
-                        sub,
-                        offset,
-                        fs,
-                        weight,
-                        style,
-                        font_size,
-                        exact_fonts,
-                        families,
-                        direction,
+                        sub, offset, fs, weight, style, font_size, variant,
+                        exact_fonts, families, direction,
                     )
                 },
                 direction,
@@ -353,6 +336,7 @@ fn shape_with_fallback(
         }
     }
 
+    log::trace!(target: "orinium_text::fallback", "phase 3 failed — no font found for any character in text={text:?}");
     Vec::new()
 }
 
@@ -472,6 +456,7 @@ impl TextLayouter {
                     style.font_weight,
                     style.font_style,
                     style.font_size,
+                    style.variant,
                     &style.exact_fonts,
                     &style.font_families,
                     run.direction,
@@ -486,7 +471,6 @@ impl TextLayouter {
                 .map(|(pos, _)| para_range.start + pos)
                 .collect();
 
-            // Build fragments for this paragraph
             let para_end = para_range.start + para_text.len();
             let mut para_x = 0.0_f32;
             let mut para_frags: Vec<Fragment> = Vec::new();
@@ -545,27 +529,12 @@ impl TextLayouter {
             };
         }
 
-        // Pre-warm fontdue font parsing for all unique fonts used by the
-        // shaped text, so the per-glyph loop never pays the one-time cost
-        // of fontdue::Font::from_bytes for unseen fonts.
-        {
-            let mut seen = std::collections::HashSet::new();
-            for para in &shaped.paras {
-                for (run, _) in &para.shaped_runs {
-                    if seen.insert(run.font_key) {
-                        let _ = font_system.get_or_parse_font(run.font_key);
-                    }
-                }
-            }
-        }
-
         let line_height = style.font_size * style.line_height;
         let mut all_lines: Vec<LayoutLine> = Vec::new();
         let mut current_y = 0.0_f32;
         let mut max_line_width = 0.0_f32;
 
         for &(line_start, line_end) in line_ranges {
-            // Find the paragraph containing this line
             let para = match shaped.paras.iter().find(|p| {
                 p.offset <= line_start
                     && (if p.len == 0 {
@@ -589,7 +558,6 @@ impl TextLayouter {
                 }
             };
 
-            // Filter glyphs for this line range
             let mut line_glyphs: Vec<ShapedRun> = Vec::new();
             for (run, dir) in &para.shaped_runs {
                 let run_byte_start = para.offset;
@@ -621,40 +589,33 @@ impl TextLayouter {
                             }],
                             font_key: run.font_key,
                             direction: *dir,
+                            font_size: run.font_size,
+                            variant: run.variant,
                         });
                     }
                 }
             }
 
-            // Position glyphs
-            struct GlyphLayoutData {
-                glyph_id: u32,
-                w: f32,
-                h: f32,
-                bx: f32,
-                by: f32,
-                x_advance: f32,
-                x_offset: f32,
-                y_offset: f32,
-                font_key: FontKey,
-            }
-
+            // Compute glyph dimensions using ttf_parser (fast, lazy parse).
+            // We avoid fontdue (which parses all glyph outlines eagerly)
+            // here because layout only needs bounding boxes, not bitmaps.
             let mut glyph_data: Vec<GlyphLayoutData> = Vec::new();
             for run in &line_glyphs {
                 for g in &run.glyphs {
-                    if let Some(r) =
-                        font_system.get_or_rasterize(run.font_key, g.glyph_id, style.font_size)
+                    if let Some((w, h, bx, by)) =
+                        font_system.get_glyph_dimensions(run.font_key, g.glyph_id, run.font_size)
                     {
                         glyph_data.push(GlyphLayoutData {
                             glyph_id: g.glyph_id,
-                            w: r.width as f32,
-                            h: r.height as f32,
-                            bx: r.bearing_x as f32,
-                            by: r.bearing_y as f32,
+                            w,
+                            h,
+                            bx,
+                            by,
                             x_advance: g.x_advance,
                             x_offset: g.x_offset,
                             y_offset: g.y_offset,
                             font_key: run.font_key,
+                            font_size: run.font_size,
                         });
                     }
                 }
@@ -667,11 +628,11 @@ impl TextLayouter {
                 .fold(0.0f32, f32::max);
 
             let mut line_width = 0.0_f32;
-            let mut positioned: Vec<(f32, u32, f32, f32, f32, FontKey)> = Vec::new();
+            let mut positioned: Vec<(f32, u32, f32, f32, f32, FontKey, f32)> = Vec::new();
             for d in &glyph_data {
                 let x_pos = line_width + d.x_offset + d.bx;
                 let y_pos = max_ascent - d.by + d.y_offset;
-                positioned.push((x_pos, d.glyph_id, d.w, d.h, y_pos, d.font_key));
+                positioned.push((x_pos, d.glyph_id, d.w, d.h, y_pos, d.font_key, d.font_size));
                 line_width += d.x_advance;
             }
 
@@ -684,7 +645,7 @@ impl TextLayouter {
 
             let positioned_glyphs: Vec<LayoutGlyph> = positioned
                 .into_iter()
-                .map(|(x, gid, w, h, y, fk)| LayoutGlyph {
+                .map(|(x, gid, w, h, y, fk, fs)| LayoutGlyph {
                     glyph_id: gid,
                     x,
                     y: current_y + y,
@@ -692,7 +653,7 @@ impl TextLayouter {
                     height: h,
                     color: style.color,
                     font_key: Some(fk),
-                    font_size: style.font_size,
+                    font_size: fs,
                 })
                 .collect();
 

@@ -10,6 +10,33 @@ pub enum FontStyle {
     Oblique,
 }
 
+/// Typographic variant (subscript / superscript).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontVariant {
+    Normal,
+    Subscript,
+    Superscript,
+}
+
+impl FontVariant {
+    /// Scale factor relative to the declared `font_size`.
+    pub fn scale(&self) -> f32 {
+        match self {
+            FontVariant::Normal => 1.0,
+            FontVariant::Subscript | FontVariant::Superscript => 0.65,
+        }
+    }
+
+    /// Baseline shift in font-size-relative units (positive = down).
+    pub fn baseline_shift(&self) -> f32 {
+        match self {
+            FontVariant::Normal => 0.0,
+            FontVariant::Subscript => 0.15,
+            FontVariant::Superscript => -0.35,
+        }
+    }
+}
+
 /// Font weight (100–900).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FontWeight(pub u16);
@@ -39,6 +66,8 @@ pub struct TextStyle<'a> {
     /// (no family-name query) and acts as a higher-priority entry in the
     /// fallback chain. Useful for web fonts loaded via `FontSystem::load_font_data`.
     pub exact_fonts: Vec<FontKey>,
+    /// Typographic variant (normal / subscript / superscript).
+    pub variant: FontVariant,
 }
 
 impl Default for TextStyle<'_> {
@@ -56,6 +85,7 @@ impl Default for TextStyle<'_> {
                 fontdb::Family::Monospace,
             ],
             exact_fonts: Vec::new(),
+            variant: FontVariant::Normal,
         }
     }
 }

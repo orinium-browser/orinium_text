@@ -1,6 +1,6 @@
 use orinium_text::{
-    BidiMode, Color, FontStyle, FontSystem, FontWeight, Fragment, LayoutGlyph, LayoutLine,
-    TextLayout, TextLayouter, TextStyle,
+    BidiMode, Color, FontStyle, FontSystem, FontVariant, FontWeight, Fragment, LayoutGlyph,
+    LayoutLine, TextLayout, TextLayouter, TextStyle,
 };
 
 fn default_style() -> TextStyle<'static> {
@@ -13,8 +13,10 @@ fn default_style() -> TextStyle<'static> {
         bidi_mode: BidiMode::Ltr,
         font_families: vec![orinium_text::fontdb::Family::SansSerif],
         exact_fonts: Vec::new(),
+        variant: FontVariant::Normal,
     }
 }
+
 
 // ── types ──────────────────────────────────────────────────────────────
 
@@ -616,6 +618,7 @@ fn test_layout_lines_trailing_newline_does_not_panic() {
         bidi_mode: BidiMode::Ltr,
         font_families: vec![fontdb::Family::SansSerif],
         exact_fonts: Vec::new(),
+        variant: FontVariant::Normal,
     };
 
     let shaped = layouter.shape_text(&mut fs, text, &style);
@@ -654,6 +657,7 @@ fn test_layout_lines_empty_text_newline() {
         bidi_mode: BidiMode::Ltr,
         font_families: vec![fontdb::Family::SansSerif],
         exact_fonts: Vec::new(),
+        variant: FontVariant::Normal,
     };
 
     let shaped = layouter.shape_text(&mut fs, text, &style);
@@ -692,6 +696,7 @@ fn test_layout_lines_consecutive_newlines() {
         bidi_mode: BidiMode::Ltr,
         font_families: vec![fontdb::Family::SansSerif],
         exact_fonts: Vec::new(),
+        variant: FontVariant::Normal,
     };
 
     let shaped = layouter.shape_text(&mut fs, text, &style);
@@ -747,6 +752,7 @@ fn test_layout_lines_freeze_repro() {
         bidi_mode: BidiMode::Ltr,
         font_families: vec![fontdb::Family::SansSerif],
         exact_fonts,
+        variant: FontVariant::Normal,
     };
 
     let text = "HTML Living Standard Test Page";
@@ -796,6 +802,7 @@ fn test_layout_lines_msgothic_ttc() {
         bidi_mode: BidiMode::Ltr,
         font_families: vec![fontdb::Family::SansSerif],
         exact_fonts,
+        variant: FontVariant::Normal,
     };
 
     // Test with ASCII text (like orinium's initial page title)

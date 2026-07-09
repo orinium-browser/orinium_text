@@ -1,6 +1,6 @@
 //! Basic usage example for orinium_text.
 
-use orinium_text::{BidiMode, Color, FontStyle, FontSystem, FontWeight, TextLayouter, TextStyle};
+use orinium_text::{BidiMode, Color, FontStyle, FontSystem, FontVariant, FontWeight, TextLayouter, TextStyle};
 
 fn main() {
     let mut font_system = FontSystem::new();
@@ -15,6 +15,7 @@ fn main() {
         bidi_mode: BidiMode::Ltr,
         font_families: vec![fontdb::Family::SansSerif],
         exact_fonts: Vec::new(),
+        variant: FontVariant::Normal,
     };
 
     // --- Two-step: shape → external line-breaking → layout ---
