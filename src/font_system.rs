@@ -799,6 +799,95 @@ impl FontSystem {
 
         Some(arc_data)
     }
+
+    /// Sets a CSS generic family to a Latin-oriented primary font.
+    ///
+    /// If the OS-native resolver returns a CJK family, it is ignored here.  CJK
+    /// fallback is handled later by `PlatformFallback::query_covering`.
+    fn set_generic_family(
+        db: &mut fontdb::Database,
+        generic: &str,
+        setter: fn(&mut fontdb::Database, &str),
+        latin_candidates: &[&str],
+    ) {
+        if let Some((name, path)) = PlatformFallback::resolve_generic_family(generic) {
+            if !Self::is_cjk_family_name(&name) {
+                if path.exists() {
+                    db.load_font_source(fontdb::Source::File(path));
+                }
+
+                setter(db, &name);
+                log::debug!(
+                target: "orinium_text::platform",
+                "generic family {generic} resolved to platform font {name}"
+            );
+                return;
+            }
+
+            log::debug!(
+            target: "orinium_text::platform",
+            "generic family {generic} resolved to CJK font {name}; keeping it as fallback only"
+        );
+        }
+
+        for &candidate in latin_candidates {
+            if Self::has_family(db, candidate) {
+                setter(db, candidate);
+                log::debug!(
+                target: "orinium_text::platform",
+                "generic family {generic} resolved to Latin candidate {candidate}"
+            );
+                return;
+            }
+        }
+
+        log::debug!(
+        target: "orinium_text::platform",
+        "generic family {generic} kept as fontdb default"
+    );
+    }
+
+    /// Returns whether a family exists in the font database.
+    fn has_family(db: &fontdb::Database, family: &str) -> bool {
+        db.faces().any(|face| {
+            face.families
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(family))
+        })
+    }
+
+    /// Returns whether a family is primarily intended for CJK text.
+    fn is_cjk_family_name(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+
+        lower.contains("cjk")
+            || lower.contains("noto sans jp")
+            || lower.contains("noto serif jp")
+            || lower.contains("noto sans kr")
+            || lower.contains("noto serif kr")
+            || lower.contains("noto sans sc")
+            || lower.contains("noto serif sc")
+            || lower.contains("noto sans tc")
+            || lower.contains("noto serif tc")
+            || lower.contains("source han")
+            || lower.contains("hiragino")
+            || lower.contains("yu gothic")
+            || lower.contains("yu mincho")
+            || lower.contains("meiryo")
+            || lower.contains("msgothic")
+            || lower.contains("ms gothic")
+            || lower.contains("ms mincho")
+            || lower.contains("pingfang")
+            || lower.contains("heiti")
+            || lower.contains("songti")
+            || lower.contains("yahei")
+            || lower.contains("simsun")
+            || lower.contains("simhei")
+            || lower.contains("malgun")
+            || lower.contains("nanum")
+            || lower.contains("wenquanyi")
+            || lower.contains("droid sans fallback")
+    }
 }
 
 impl Default for FontSystem {
