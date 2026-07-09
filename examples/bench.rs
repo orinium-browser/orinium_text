@@ -286,6 +286,8 @@ fn fmt_duration(duration: Duration) -> String {
 
 fn sans_serif() -> Vec<fontdb::Family<'static>> {
     vec![
+        fontdb::Family::Name("DejaVu Sans"),
+        fontdb::Family::Name("Liberation Sans"),
         fontdb::Family::SansSerif,
         fontdb::Family::Serif,
         fontdb::Family::Monospace,
@@ -294,6 +296,8 @@ fn sans_serif() -> Vec<fontdb::Family<'static>> {
 
 fn monospace() -> Vec<fontdb::Family<'static>> {
     vec![
+        fontdb::Family::Name("DejaVu Sans Mono"),
+        fontdb::Family::Name("Liberation Mono"),
         fontdb::Family::Monospace,
         fontdb::Family::SansSerif,
         fontdb::Family::Serif,
