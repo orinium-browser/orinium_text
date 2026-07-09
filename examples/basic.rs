@@ -1,6 +1,8 @@
 //! Basic usage example for orinium_text.
 
-use orinium_text::{BidiMode, Color, FontStyle, FontSystem, FontVariant, FontWeight, TextLayouter, TextStyle};
+use orinium_text::{
+    BidiMode, Color, FontStyle, FontSystem, FontVariant, FontWeight, TextLayouter, TextStyle,
+};
 
 fn main() {
     let mut font_system = FontSystem::new();

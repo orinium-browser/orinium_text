@@ -248,8 +248,16 @@ fn shape_with_fallback(
         let font_key = exact_fonts[0];
         if font_system.get_font_data(font_key).is_none() {
             return shape_with_fallback(
-                text, run_start, font_system, weight, style, font_size, variant,
-                &exact_fonts[1..], families, direction,
+                text,
+                run_start,
+                font_system,
+                weight,
+                style,
+                font_size,
+                variant,
+                &exact_fonts[1..],
+                families,
+                direction,
             );
         }
 
@@ -270,18 +278,38 @@ fn shape_with_fallback(
         });
         if !style_ok {
             return shape_with_fallback(
-                text, run_start, font_system, weight, style, font_size, variant,
-                &exact_fonts[1..], families, direction,
+                text,
+                run_start,
+                font_system,
+                weight,
+                style,
+                font_size,
+                variant,
+                &exact_fonts[1..],
+                families,
+                direction,
             );
         }
 
         return shape_with_font(
-            text, run_start, font_key, font_system,
-            eff_font_size, variant,
+            text,
+            run_start,
+            font_key,
+            font_system,
+            eff_font_size,
+            variant,
             &mut |sub, offset, fs| {
                 shape_with_fallback(
-                    sub, offset, fs, weight, style, font_size, variant,
-                    &exact_fonts[1..], families, direction,
+                    sub,
+                    offset,
+                    fs,
+                    weight,
+                    style,
+                    font_size,
+                    variant,
+                    &exact_fonts[1..],
+                    families,
+                    direction,
                 )
             },
             direction,
@@ -294,19 +322,39 @@ fn shape_with_fallback(
             Some(key) => key,
             None => {
                 return shape_with_fallback(
-                    text, run_start, font_system, weight, style, font_size, variant,
-                    exact_fonts, &families[1..], direction,
+                    text,
+                    run_start,
+                    font_system,
+                    weight,
+                    style,
+                    font_size,
+                    variant,
+                    exact_fonts,
+                    &families[1..],
+                    direction,
                 );
             }
         };
 
         return shape_with_font(
-            text, run_start, font_key, font_system,
-            eff_font_size, variant,
+            text,
+            run_start,
+            font_key,
+            font_system,
+            eff_font_size,
+            variant,
             &mut |sub, offset, fs| {
                 shape_with_fallback(
-                    sub, offset, fs, weight, style, font_size, variant,
-                    exact_fonts, &families[1..], direction,
+                    sub,
+                    offset,
+                    fs,
+                    weight,
+                    style,
+                    font_size,
+                    variant,
+                    exact_fonts,
+                    &families[1..],
+                    direction,
                 )
             },
             direction,
@@ -323,12 +371,24 @@ fn shape_with_fallback(
             // recursively handled by this same phase (but that font is now
             // cached so query_any_covering won't return it again).
             return shape_with_font(
-                text, run_start, font_key, font_system,
-                eff_font_size, variant,
+                text,
+                run_start,
+                font_key,
+                font_system,
+                eff_font_size,
+                variant,
                 &mut |sub, offset, fs| {
                     shape_with_fallback(
-                        sub, offset, fs, weight, style, font_size, variant,
-                        exact_fonts, families, direction,
+                        sub,
+                        offset,
+                        fs,
+                        weight,
+                        style,
+                        font_size,
+                        variant,
+                        exact_fonts,
+                        families,
+                        direction,
                     )
                 },
                 direction,

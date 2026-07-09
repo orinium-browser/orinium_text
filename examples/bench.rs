@@ -1,6 +1,8 @@
+use orinium_text::{
+    BidiMode, Color, FontStyle, FontSystem, FontVariant, FontWeight, TextLayouter, TextStyle,
+};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
-use orinium_text::{BidiMode, Color, FontStyle, FontSystem, FontVariant, FontWeight, TextLayouter, TextStyle};
 
 #[derive(Debug, Clone)]
 pub struct BenchCase {
@@ -10,7 +12,7 @@ pub struct BenchCase {
     weight: u16,
     style: FontStyle,
     variant: FontVariant,
-    families: Vec<fontdb::Family<'static>>
+    families: Vec<fontdb::Family<'static>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,7 +35,7 @@ fn main() {
             weight: 700,
             style: FontStyle::Normal,
             variant: FontVariant::Normal,
-            families: sans_serif()
+            families: sans_serif(),
         },
         BenchCase {
             name: "h1-italic",
@@ -42,7 +44,7 @@ fn main() {
             weight: 700,
             style: FontStyle::Italic,
             variant: FontVariant::Normal,
-            families: sans_serif()
+            families: sans_serif(),
         },
         BenchCase {
             name: "body-fragment",
@@ -51,7 +53,7 @@ fn main() {
             weight: 1600,
             style: FontStyle::Normal,
             variant: FontVariant::Normal,
-            families: sans_serif()
+            families: sans_serif(),
         },
         BenchCase {
             name: "inline-code",
@@ -60,7 +62,7 @@ fn main() {
             weight: 400,
             style: FontStyle::Normal,
             variant: FontVariant::Normal,
-            families: monospace()
+            families: monospace(),
         },
         BenchCase {
             name: "italic",
@@ -69,7 +71,7 @@ fn main() {
             weight: 1600,
             style: FontStyle::Italic,
             variant: FontVariant::Normal,
-            families: sans_serif()
+            families: sans_serif(),
         },
         BenchCase {
             name: "subscript",
@@ -78,7 +80,7 @@ fn main() {
             weight: 1600,
             style: FontStyle::Normal,
             variant: FontVariant::Subscript,
-            families: sans_serif()
+            families: sans_serif(),
         },
         BenchCase {
             name: "japanese",
@@ -87,7 +89,7 @@ fn main() {
             weight: 1600,
             style: FontStyle::Normal,
             variant: FontVariant::Normal,
-            families: sans_serif()
+            families: sans_serif(),
         },
     ];
 
@@ -281,8 +283,6 @@ fn fmt_duration(duration: Duration) -> String {
         format!("{:.3}µs", duration.as_secs_f64() * 1_000_000.0)
     }
 }
-
-
 
 fn sans_serif() -> Vec<fontdb::Family<'static>> {
     vec![

@@ -395,10 +395,33 @@ impl FontSystem {
         if let Some(font) = self.parsed_fonts.get(&font_key.0) {
             return Some(font.clone());
         }
+
+        let total_start = std::time::Instant::now();
+
+        let data_start = std::time::Instant::now();
         let data = self.get_font_data(font_key)?;
+        let data_elapsed = data_start.elapsed();
+
         let face_index = self.db.face(font_key.0)?.index;
-        let face_data = extract_ttc_face(&data, face_index)?;
+
+        let extract_start = std::time::Instant::now();
+        let face_data = extract_ttc_face(data.as_slice(), face_index)?;
+        let extract_elapsed = extract_start.elapsed();
+
+        let parse_start = std::time::Instant::now();
         let font = Font::from_bytes(face_data, FontSettings::default()).ok()?;
+        let parse_elapsed = parse_start.elapsed();
+
+        println!(
+            "fontdue parse: id={:?} face_index={} data={:?} extract={:?} parse={:?} total={:?}",
+            font_key.0,
+            face_index,
+            data_elapsed,
+            extract_elapsed,
+            parse_elapsed,
+            total_start.elapsed(),
+        );
+
         let font = Arc::new(font);
         self.parsed_fonts.push(font_key.0, font.clone());
         Some(font)
