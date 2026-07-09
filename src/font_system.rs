@@ -6,7 +6,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use fontdue::{Font, FontSettings};
 use lru::LruCache;
 use rustybuzz::Face;
-
+use swash::FontRef;
+use swash::scale::{Render, ScaleContext, Source};
+use swash::zeno::Format;
 use crate::layout::RasterizedGlyph;
 use crate::types::{FontKey, FontStyle, FontWeight};
 
@@ -334,6 +336,7 @@ pub struct FontSystem {
     pub(crate) parsed_fonts: LruCache<fontdb::ID, Arc<Font>>,
     bitmap_cache: LruCache<(fontdb::ID, u32, u32), CachedBitmap>,
     face_cache: HashMap<fontdb::ID, CachedFace>,
+    scale_context: ScaleContext,
     /// Cache mapping characters to fonts that cover them.
     /// Populated by `query_any_covering` on first use.
     char_to_font: HashMap<char, FontKey>,
@@ -396,6 +399,7 @@ impl FontSystem {
             parsed_fonts: LruCache::new(NonZeroUsize::new(PARSED_FONTS_CAPACITY).unwrap()),
             bitmap_cache: LruCache::new(NonZeroUsize::new(BITMAP_CACHE_CAPACITY).unwrap()),
             face_cache: HashMap::new(),
+            scale_context: ScaleContext::with_max_entries(128),
             char_to_font: HashMap::new(),
         }
     }
@@ -496,17 +500,44 @@ impl FontSystem {
     ) -> Option<(RasterizedGlyph, Vec<u8>)> {
         let size_bits = font_size.to_bits();
         let key = (font_key.0, glyph_id, size_bits);
+
         if let Some(cached) = self.bitmap_cache.get(&key) {
             return Some((cached.metrics.clone(), cached.alpha_mask.clone()));
         }
-        let font = self.get_or_parse_font(font_key)?;
-        let (metrics, alpha_mask) = font.rasterize_indexed(glyph_id as u16, font_size);
+
+        let face_index = self.db.face(font_key.0)?.index as usize;
+        let data = self.get_font_data(font_key)?;
+
+        let font = FontRef::from_index(data.as_slice(), face_index)?;
+
+        let mut scaler = self
+            .scale_context
+            .builder(font)
+            .size(font_size)
+            .hint(true)
+            .build();
+
+        let image = Render::new(&[Source::Outline])
+            .format(Format::Alpha)
+            .render(&mut scaler, glyph_id as u16)?;
+
+        let width = image.placement.width;
+        let height = image.placement.height;
+
+        let expected_len = (width as usize).checked_mul(height as usize)?;
+        if image.data.len() != expected_len {
+            return None;
+        }
+
         let rasterized = RasterizedGlyph {
-            width: metrics.width as u32,
-            height: metrics.height as u32,
-            bearing_x: metrics.xmin,
-            bearing_y: metrics.ymin + metrics.height as i32,
+            width,
+            height,
+            bearing_x: image.placement.left,
+            bearing_y: -image.placement.top,
         };
+
+        let alpha_mask = image.data;
+
         self.bitmap_cache.push(
             key,
             CachedBitmap {
@@ -514,6 +545,7 @@ impl FontSystem {
                 alpha_mask: alpha_mask.clone(),
             },
         );
+
         Some((rasterized, alpha_mask))
     }
 
@@ -798,95 +830,6 @@ impl FontSystem {
         self.font_data.insert(key.0, arc_data.clone());
 
         Some(arc_data)
-    }
-
-    /// Sets a CSS generic family to a Latin-oriented primary font.
-    ///
-    /// If the OS-native resolver returns a CJK family, it is ignored here.  CJK
-    /// fallback is handled later by `PlatformFallback::query_covering`.
-    fn set_generic_family(
-        db: &mut fontdb::Database,
-        generic: &str,
-        setter: fn(&mut fontdb::Database, &str),
-        latin_candidates: &[&str],
-    ) {
-        if let Some((name, path)) = PlatformFallback::resolve_generic_family(generic) {
-            if !Self::is_cjk_family_name(&name) {
-                if path.exists() {
-                    db.load_font_source(fontdb::Source::File(path));
-                }
-
-                setter(db, &name);
-                log::debug!(
-                target: "orinium_text::platform",
-                "generic family {generic} resolved to platform font {name}"
-            );
-                return;
-            }
-
-            log::debug!(
-            target: "orinium_text::platform",
-            "generic family {generic} resolved to CJK font {name}; keeping it as fallback only"
-        );
-        }
-
-        for &candidate in latin_candidates {
-            if Self::has_family(db, candidate) {
-                setter(db, candidate);
-                log::debug!(
-                target: "orinium_text::platform",
-                "generic family {generic} resolved to Latin candidate {candidate}"
-            );
-                return;
-            }
-        }
-
-        log::debug!(
-        target: "orinium_text::platform",
-        "generic family {generic} kept as fontdb default"
-    );
-    }
-
-    /// Returns whether a family exists in the font database.
-    fn has_family(db: &fontdb::Database, family: &str) -> bool {
-        db.faces().any(|face| {
-            face.families
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case(family))
-        })
-    }
-
-    /// Returns whether a family is primarily intended for CJK text.
-    fn is_cjk_family_name(name: &str) -> bool {
-        let lower = name.to_ascii_lowercase();
-
-        lower.contains("cjk")
-            || lower.contains("noto sans jp")
-            || lower.contains("noto serif jp")
-            || lower.contains("noto sans kr")
-            || lower.contains("noto serif kr")
-            || lower.contains("noto sans sc")
-            || lower.contains("noto serif sc")
-            || lower.contains("noto sans tc")
-            || lower.contains("noto serif tc")
-            || lower.contains("source han")
-            || lower.contains("hiragino")
-            || lower.contains("yu gothic")
-            || lower.contains("yu mincho")
-            || lower.contains("meiryo")
-            || lower.contains("msgothic")
-            || lower.contains("ms gothic")
-            || lower.contains("ms mincho")
-            || lower.contains("pingfang")
-            || lower.contains("heiti")
-            || lower.contains("songti")
-            || lower.contains("yahei")
-            || lower.contains("simsun")
-            || lower.contains("simhei")
-            || lower.contains("malgun")
-            || lower.contains("nanum")
-            || lower.contains("wenquanyi")
-            || lower.contains("droid sans fallback")
     }
 }
 
