@@ -418,30 +418,24 @@ impl FontSystem {
         glyph_id: u32,
         font_size: f32,
     ) -> Option<(f32, f32, f32, f32)> {
+        let face_index = self.db.face(font_key.0)?.index;
         let data = self.get_font_data(font_key)?;
-        let face_info = self.db.face(font_key.0)?;
-        let face_data = extract_ttc_face(&data, face_info.index)?;
-        let face = rustybuzz::ttf_parser::Face::parse(&face_data, 0).ok()?;
+
+        let face = rustybuzz::ttf_parser::Face::parse(data.as_slice(), face_index).ok()?;
         let upem = face.units_per_em() as f32;
         let scale = font_size / upem;
-        if let Some(bbox) = face
-            .glyph_bounding_box(rustybuzz::ttf_parser::GlyphId(glyph_id as u16))
-        {
+
+        let glyph = rustybuzz::ttf_parser::GlyphId(glyph_id as u16);
+
+        if let Some(bbox) = face.glyph_bounding_box(glyph) {
             Some((
                 (bbox.x_max - bbox.x_min) as f32 * scale,
                 (bbox.y_max - bbox.y_min) as f32 * scale,
                 bbox.x_min as f32 * scale,
                 bbox.y_max as f32 * scale,
             ))
-        } else if let Some(advance) = face
-            .glyph_hor_advance(rustybuzz::ttf_parser::GlyphId(glyph_id as u16))
-        {
-            Some((
-                advance as f32 * scale,
-                0.0,
-                0.0,
-                0.0,
-            ))
+        } else if let Some(advance) = face.glyph_hor_advance(glyph) {
+            Some((advance as f32 * scale, 0.0, 0.0, 0.0))
         } else {
             None
         }
