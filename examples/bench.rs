@@ -136,7 +136,7 @@ fn bench_warm_repeated(cases: &[BenchCase], iterations: usize) {
         let mut last = None;
 
         for _ in 0..iterations {
-            let result = run_case(&mut fs, &mut layouter, case, false);
+            let result = run_case(&mut fs, &mut layouter, case, true);
             shape += result.shape;
             layout += result.layout;
             rasterize += result.rasterize;
