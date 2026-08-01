@@ -235,26 +235,42 @@ fn shape_with_fallback(
     families: &[fontdb::Family],
     direction: Direction,
 ) -> Vec<ShapedRun> {
-    fn inner(
-        text: &str,
+    struct Task {
+        start: usize,
+        end: usize,
         run_start: usize,
-        font_system: &mut FontSystem,
-        weight: FontWeight,
-        style: FontStyle,
-        font_size: f32,
-        variant: FontVariant,
-        exact_fonts: &[FontKey],
-        families: &[fontdb::Family],
-        direction: Direction,
-    ) -> Vec<ShapedRun> {
-        if text.is_empty() {
-            return Vec::new();
+
+        exact_index: usize,
+        family_index: usize,
+    }
+
+    let mut result = Vec::new();
+    let mut pending = Vec::new();
+
+    let eff_font_size = font_size * variant.scale();
+
+    pending.push(Task {
+        start: 0,
+        end: text.len(),
+        run_start,
+
+        exact_index: 0,
+        family_index: 0,
+    });
+
+    while let Some(task) = pending.pop() {
+        if task.start >= task.end {
+            continue;
         }
 
-        let eff_font_size = font_size * variant.scale();
+        let current = &text[task.start..task.end];
 
-        // Phase 1: exact fonts
-        for (index, &font_key) in exact_fonts.iter().enumerate() {
+        let mut shaped = false;
+
+        // exact fonts
+        for index in task.exact_index..exact_fonts.len() {
+            let font_key = exact_fonts[index];
+
             if font_system.get_font_data(font_key).is_none() {
                 continue;
             }
@@ -276,108 +292,140 @@ fn shape_with_fallback(
                 continue;
             }
 
-            return shape_with_font(
-                text,
-                run_start,
+            let mut missing = Vec::new();
+
+            let runs = shape_with_font(
+                current,
+                task.run_start + task.start,
                 font_key,
                 font_system,
                 eff_font_size,
                 variant,
-                &mut |sub, offset, fs| {
-                    inner(
-                        sub,
-                        offset,
-                        fs,
-                        weight,
-                        style,
-                        font_size,
-                        variant,
-                        &exact_fonts[index + 1..],
-                        families,
-                        direction,
-                    )
+                &mut |sub, offset, _| {
+                    let local = sub.as_ptr() as usize - text.as_ptr() as usize;
+
+                    missing.push(Task {
+                        start: local,
+                        end: local + sub.len(),
+                        run_start: offset,
+
+                        exact_index: index + 1,
+                        family_index: task.family_index,
+                    });
+
+                    Vec::new()
                 },
                 direction,
             );
+
+            result.extend(runs);
+
+            for next in missing.into_iter().rev() {
+                pending.push(next);
+            }
+
+            shaped = true;
+            break;
         }
 
-        // Phase 2: families
-        for (index, family) in families.iter().enumerate() {
-            let Some(font_key) =
-                find_font(font_system, std::slice::from_ref(family), weight, style)
-            else {
+        if shaped {
+            continue;
+        }
+
+        // family fonts
+        for index in task.family_index..families.len() {
+            let Some(font_key) = find_font(
+                font_system,
+                std::slice::from_ref(&families[index]),
+                weight,
+                style,
+            ) else {
                 continue;
             };
 
-            return shape_with_font(
-                text,
-                run_start,
+            let mut missing = Vec::new();
+
+            let runs = shape_with_font(
+                current,
+                task.run_start + task.start,
                 font_key,
                 font_system,
                 eff_font_size,
                 variant,
-                &mut |sub, offset, fs| {
-                    inner(
-                        sub,
-                        offset,
-                        fs,
-                        weight,
-                        style,
-                        font_size,
-                        variant,
-                        exact_fonts,
-                        &families[index + 1..],
-                        direction,
-                    )
+                &mut |sub, offset, _| {
+                    let local = sub.as_ptr() as usize - text.as_ptr() as usize;
+
+                    missing.push(Task {
+                        start: local,
+                        end: local + sub.len(),
+                        run_start: offset,
+
+                        exact_index: task.exact_index,
+                        family_index: index + 1,
+                    });
+
+                    Vec::new()
                 },
                 direction,
             );
-        }
 
-        // Phase 3: platform fallback
-        for ch in text.chars() {
-            if let Some(font_key) = font_system.query_any_covering(ch) {
-                return shape_with_font(
-                    text,
-                    run_start,
-                    font_key,
-                    font_system,
-                    eff_font_size,
-                    variant,
-                    &mut |sub, offset, fs| {
-                        inner(
-                            sub,
-                            offset,
-                            fs,
-                            weight,
-                            style,
-                            font_size,
-                            variant,
-                            exact_fonts,
-                            families,
-                            direction,
-                        )
-                    },
-                    direction,
-                );
+            result.extend(runs);
+
+            for next in missing.into_iter().rev() {
+                pending.push(next);
             }
+
+            shaped = true;
+            break;
         }
 
-        Vec::new()
+        if shaped {
+            continue;
+        }
+
+        // platform fallback
+        for ch in current.chars() {
+            let Some(font_key) = font_system.query_any_covering(ch) else {
+                continue;
+            };
+
+            let mut missing = Vec::new();
+
+            let runs = shape_with_font(
+                current,
+                task.run_start + task.start,
+                font_key,
+                font_system,
+                eff_font_size,
+                variant,
+                &mut |sub, offset, _| {
+                    let local = sub.as_ptr() as usize - text.as_ptr() as usize;
+
+                    missing.push(Task {
+                        start: local,
+                        end: local + sub.len(),
+                        run_start: offset,
+
+                        exact_index: 0,
+                        family_index: 0,
+                    });
+
+                    Vec::new()
+                },
+                direction,
+            );
+
+            result.extend(runs);
+
+            for next in missing.into_iter().rev() {
+                pending.push(next);
+            }
+
+            break;
+        }
     }
 
-    inner(
-        text,
-        run_start,
-        font_system,
-        weight,
-        style,
-        font_size,
-        variant,
-        exact_fonts,
-        families,
-        direction,
-    )
+    result
 }
 
 /// A single layout fragment — the atomic unit the external layout engine
