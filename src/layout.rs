@@ -236,12 +236,13 @@ fn shape_with_fallback(
     direction: Direction,
 ) -> Vec<ShapedRun> {
     struct Task {
-        start: usize,
-        end: usize,
+        text: String,
         run_start: usize,
 
         exact_index: usize,
         family_index: usize,
+
+        depth: u8,
     }
 
     let mut result = Vec::new();
@@ -250,24 +251,32 @@ fn shape_with_fallback(
     let eff_font_size = font_size * variant.scale();
 
     pending.push(Task {
-        start: 0,
-        end: text.len(),
+        text: text.to_owned(),
         run_start,
 
         exact_index: 0,
         family_index: 0,
+
+        depth: 0,
     });
 
     while let Some(task) = pending.pop() {
-        if task.start >= task.end {
+        if task.text.is_empty() {
             continue;
         }
 
-        let current = &text[task.start..task.end];
+        // Prevent pathological fallback loops.
+        if task.depth >= 32 {
+            log::warn!(
+                target: "orinium_text::fallback",
+                "fallback depth exceeded"
+            );
+            continue;
+        }
 
-        let mut shaped = false;
+        let mut handled = false;
 
-        // exact fonts
+        // Phase 1: exact fonts
         for index in task.exact_index..exact_fonts.len() {
             let font_key = exact_fonts[index];
 
@@ -295,22 +304,21 @@ fn shape_with_fallback(
             let mut missing = Vec::new();
 
             let runs = shape_with_font(
-                current,
-                task.run_start + task.start,
+                &task.text,
+                task.run_start,
                 font_key,
                 font_system,
                 eff_font_size,
                 variant,
                 &mut |sub, offset, _| {
-                    let local = sub.as_ptr() as usize - text.as_ptr() as usize;
-
                     missing.push(Task {
-                        start: local,
-                        end: local + sub.len(),
+                        text: sub.to_owned(),
                         run_start: offset,
 
                         exact_index: index + 1,
                         family_index: task.family_index,
+
+                        depth: task.depth + 1,
                     });
 
                     Vec::new()
@@ -320,19 +328,17 @@ fn shape_with_fallback(
 
             result.extend(runs);
 
-            for next in missing.into_iter().rev() {
-                pending.push(next);
-            }
+            pending.extend(missing.into_iter().rev());
 
-            shaped = true;
+            handled = true;
             break;
         }
 
-        if shaped {
+        if handled {
             continue;
         }
 
-        // family fonts
+        // Phase 2: font families
         for index in task.family_index..families.len() {
             let Some(font_key) = find_font(
                 font_system,
@@ -346,22 +352,21 @@ fn shape_with_fallback(
             let mut missing = Vec::new();
 
             let runs = shape_with_font(
-                current,
-                task.run_start + task.start,
+                &task.text,
+                task.run_start,
                 font_key,
                 font_system,
                 eff_font_size,
                 variant,
                 &mut |sub, offset, _| {
-                    let local = sub.as_ptr() as usize - text.as_ptr() as usize;
-
                     missing.push(Task {
-                        start: local,
-                        end: local + sub.len(),
+                        text: sub.to_owned(),
                         run_start: offset,
 
                         exact_index: task.exact_index,
                         family_index: index + 1,
+
+                        depth: task.depth + 1,
                     });
 
                     Vec::new()
@@ -371,20 +376,18 @@ fn shape_with_fallback(
 
             result.extend(runs);
 
-            for next in missing.into_iter().rev() {
-                pending.push(next);
-            }
+            pending.extend(missing.into_iter().rev());
 
-            shaped = true;
+            handled = true;
             break;
         }
 
-        if shaped {
+        if handled {
             continue;
         }
 
-        // platform fallback
-        for ch in current.chars() {
+        // Phase 3: platform fallback
+        for ch in task.text.chars() {
             let Some(font_key) = font_system.query_any_covering(ch) else {
                 continue;
             };
@@ -392,22 +395,21 @@ fn shape_with_fallback(
             let mut missing = Vec::new();
 
             let runs = shape_with_font(
-                current,
-                task.run_start + task.start,
+                &task.text,
+                task.run_start,
                 font_key,
                 font_system,
                 eff_font_size,
                 variant,
                 &mut |sub, offset, _| {
-                    let local = sub.as_ptr() as usize - text.as_ptr() as usize;
-
                     missing.push(Task {
-                        start: local,
-                        end: local + sub.len(),
+                        text: sub.to_owned(),
                         run_start: offset,
 
                         exact_index: 0,
                         family_index: 0,
+
+                        depth: task.depth + 1,
                     });
 
                     Vec::new()
@@ -417,9 +419,7 @@ fn shape_with_fallback(
 
             result.extend(runs);
 
-            for next in missing.into_iter().rev() {
-                pending.push(next);
-            }
+            pending.extend(missing.into_iter().rev());
 
             break;
         }
