@@ -235,141 +235,47 @@ fn shape_with_fallback(
     families: &[fontdb::Family],
     direction: Direction,
 ) -> Vec<ShapedRun> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-
-    log::trace!(target: "orinium_text::fallback", "shape_with_fallback text={text:?} exact_fonts={exact_fonts:?} families={families:?}");
-
-    let eff_font_size = font_size * variant.scale();
-
-    // Phase 1: try exact fonts by FontKey (no family-name query)
-    if !exact_fonts.is_empty() {
-        let font_key = exact_fonts[0];
-        if font_system.get_font_data(font_key).is_none() {
-            return shape_with_fallback(
-                text,
-                run_start,
-                font_system,
-                weight,
-                style,
-                font_size,
-                variant,
-                &exact_fonts[1..],
-                families,
-                direction,
-            );
+    fn inner(
+        text: &str,
+        run_start: usize,
+        font_system: &mut FontSystem,
+        weight: FontWeight,
+        style: FontStyle,
+        font_size: f32,
+        variant: FontVariant,
+        exact_fonts: &[FontKey],
+        families: &[fontdb::Family],
+        direction: Direction,
+    ) -> Vec<ShapedRun> {
+        if text.is_empty() {
+            return Vec::new();
         }
 
-        // Skip exact fonts whose face style is incompatible with the request.
-        // When Normal is requested, using an Italic/Oblique face causes the
-        // entire text to render slanted — the most common source of accidental
-        // italic body text.
-        let style_ok = font_system.db.face(font_key.0).map_or(false, |face| {
-            let compatible = match (style, face.style) {
-                (FontStyle::Normal, fontdb::Style::Normal) => true,
-                (FontStyle::Normal, _) => false,
-                (FontStyle::Italic, fontdb::Style::Normal) => false,
-                (FontStyle::Italic, _) => true,
-                (FontStyle::Oblique, fontdb::Style::Normal) => false,
-                (FontStyle::Oblique, _) => true,
-            };
-            compatible
-        });
-        if !style_ok {
-            return shape_with_fallback(
-                text,
-                run_start,
-                font_system,
-                weight,
-                style,
-                font_size,
-                variant,
-                &exact_fonts[1..],
-                families,
-                direction,
-            );
-        }
+        let eff_font_size = font_size * variant.scale();
 
-        return shape_with_font(
-            text,
-            run_start,
-            font_key,
-            font_system,
-            eff_font_size,
-            variant,
-            &mut |sub, offset, fs| {
-                shape_with_fallback(
-                    sub,
-                    offset,
-                    fs,
-                    weight,
-                    style,
-                    font_size,
-                    variant,
-                    &exact_fonts[1..],
-                    families,
-                    direction,
-                )
-            },
-            direction,
-        );
-    }
-
-    // Phase 2: try font families (query by name)
-    if !families.is_empty() {
-        let font_key = match find_font(font_system, &families[..1], weight, style) {
-            Some(key) => key,
-            None => {
-                return shape_with_fallback(
-                    text,
-                    run_start,
-                    font_system,
-                    weight,
-                    style,
-                    font_size,
-                    variant,
-                    exact_fonts,
-                    &families[1..],
-                    direction,
-                );
+        // Phase 1: exact fonts
+        for (index, &font_key) in exact_fonts.iter().enumerate() {
+            if font_system.get_font_data(font_key).is_none() {
+                continue;
             }
-        };
 
-        return shape_with_font(
-            text,
-            run_start,
-            font_key,
-            font_system,
-            eff_font_size,
-            variant,
-            &mut |sub, offset, fs| {
-                shape_with_fallback(
-                    sub,
-                    offset,
-                    fs,
-                    weight,
-                    style,
-                    font_size,
-                    variant,
-                    exact_fonts,
-                    &families[1..],
-                    direction,
-                )
-            },
-            direction,
-        );
-    }
+            let style_ok =
+                font_system
+                    .db
+                    .face(font_key.0)
+                    .is_some_and(|face| match (style, face.style) {
+                        (FontStyle::Normal, fontdb::Style::Normal) => true,
+                        (FontStyle::Normal, _) => false,
+                        (FontStyle::Italic, fontdb::Style::Normal) => false,
+                        (FontStyle::Italic, _) => true,
+                        (FontStyle::Oblique, fontdb::Style::Normal) => false,
+                        (FontStyle::Oblique, _) => true,
+                    });
 
-    // Phase 3: last resort — try any font in the database that covers the
-    // missing characters (platform-level fallback: fontconfig / CoreText /
-    // DirectWrite through fontdb).
-    for ch in text.chars() {
-        if let Some(font_key) = font_system.query_any_covering(ch) {
-            // Found a font covering this character; try shaping the entire
-            // text with it. If there are still .notdef glyphs they will be
-            // recursively handled by this same phase (but that font is now
-            // cached so query_any_covering won't return it again).
+            if !style_ok {
+                continue;
+            }
+
             return shape_with_font(
                 text,
                 run_start,
@@ -378,7 +284,40 @@ fn shape_with_fallback(
                 eff_font_size,
                 variant,
                 &mut |sub, offset, fs| {
-                    shape_with_fallback(
+                    inner(
+                        sub,
+                        offset,
+                        fs,
+                        weight,
+                        style,
+                        font_size,
+                        variant,
+                        &exact_fonts[index + 1..],
+                        families,
+                        direction,
+                    )
+                },
+                direction,
+            );
+        }
+
+        // Phase 2: families
+        for (index, family) in families.iter().enumerate() {
+            let Some(font_key) =
+                find_font(font_system, std::slice::from_ref(family), weight, style)
+            else {
+                continue;
+            };
+
+            return shape_with_font(
+                text,
+                run_start,
+                font_key,
+                font_system,
+                eff_font_size,
+                variant,
+                &mut |sub, offset, fs| {
+                    inner(
                         sub,
                         offset,
                         fs,
@@ -387,17 +326,58 @@ fn shape_with_fallback(
                         font_size,
                         variant,
                         exact_fonts,
-                        families,
+                        &families[index + 1..],
                         direction,
                     )
                 },
                 direction,
             );
         }
+
+        // Phase 3: platform fallback
+        for ch in text.chars() {
+            if let Some(font_key) = font_system.query_any_covering(ch) {
+                return shape_with_font(
+                    text,
+                    run_start,
+                    font_key,
+                    font_system,
+                    eff_font_size,
+                    variant,
+                    &mut |sub, offset, fs| {
+                        inner(
+                            sub,
+                            offset,
+                            fs,
+                            weight,
+                            style,
+                            font_size,
+                            variant,
+                            exact_fonts,
+                            families,
+                            direction,
+                        )
+                    },
+                    direction,
+                );
+            }
+        }
+
+        Vec::new()
     }
 
-    log::trace!(target: "orinium_text::fallback", "phase 3 failed — no font found for any character in text={text:?}");
-    Vec::new()
+    inner(
+        text,
+        run_start,
+        font_system,
+        weight,
+        style,
+        font_size,
+        variant,
+        exact_fonts,
+        families,
+        direction,
+    )
 }
 
 /// A single layout fragment — the atomic unit the external layout engine
