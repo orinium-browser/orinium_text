@@ -3,14 +3,14 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock, Mutex};
 
+use crate::layout::RasterizedGlyph;
+use crate::types::{FontKey, FontStyle, FontWeight};
 use fontdue::{Font, FontSettings};
 use lru::LruCache;
 use rustybuzz::Face;
 use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source};
 use swash::zeno::Format;
-use crate::layout::RasterizedGlyph;
-use crate::types::{FontKey, FontStyle, FontWeight};
 
 /// Global cache: character → (font_family_name, face_index).
 ///
@@ -182,7 +182,7 @@ mod imp {
         fn get_locale_name(&self, _: u32) -> (Cow<'_, str>, u32) {
             (Cow::Borrowed(&self.0), u32::MAX)
         }
-        fn get_paragraph_reading_direction(&self) -> i32 {
+        fn get_paragraph_reading_direction(&self) -> u32 {
             DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
         }
     }
@@ -200,10 +200,12 @@ mod imp {
         let fallback = dwrote::FontFallback::get_system_fallback()?;
         let collection = dwrote::FontCollection::system();
 
-        let utf16: Vec<u16> = ch.encode_utf16().collect();
+        let mut utf16 = [0u16; 2];
+        let utf16 = ch.encode_utf16(&mut utf16);
+
         let source = dwrote::TextAnalysisSource::from_text(
             Box::new(Source(String::new())),
-            Cow::Owned(utf16.clone()),
+            Cow::Owned(utf16.to_vec()),
         );
 
         let dw_weight = match weight.0 {
@@ -229,7 +231,7 @@ mod imp {
             fontdb::Family::Name(name) => Some(name.as_ref()),
             _ => None,
         });
-        let base_family_str = base_family.map(|s| s.to_owned());
+        let base_family_str = base_family.map(|s: &str| s.to_owned());
 
         let result = fallback.map_characters(
             &source,
