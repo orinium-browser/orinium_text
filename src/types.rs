@@ -3,7 +3,7 @@
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
 
 /// Font style variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontStyle {
     Normal,
     Italic,
@@ -11,7 +11,7 @@ pub enum FontStyle {
 }
 
 /// Typographic variant (subscript / superscript).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontVariant {
     Normal,
     Subscript,
@@ -42,7 +42,7 @@ impl FontVariant {
 pub struct FontWeight(pub u16);
 
 /// Controls how the bidirectional text algorithm determines the base paragraph direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BidiMode {
     Auto,
     Ltr,
