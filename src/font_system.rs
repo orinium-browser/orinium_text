@@ -342,6 +342,12 @@ pub struct FontSystem {
     /// Cache mapping characters to fonts that cover them.
     /// Populated by `query_any_covering` on first use.
     char_to_font: HashMap<char, FontKey>,
+    /// Ordered fallback cascade discovered for this font system.
+    ///
+    /// Reusing an earlier fallback before asking the platform about another
+    /// character keeps a script run in one font whenever that font has the
+    /// required glyphs.
+    fallback_fonts: Vec<FontKey>,
 }
 
 impl FontSystem {
@@ -403,6 +409,7 @@ impl FontSystem {
             face_cache: HashMap::new(),
             scale_context: ScaleContext::with_max_entries(128),
             char_to_font: HashMap::new(),
+            fallback_fonts: Vec::new(),
         }
     }
 
@@ -670,17 +677,34 @@ impl FontSystem {
             return Some(key);
         }
 
+        // Prefer the fallback cascade already selected for this FontSystem.
+        // Platform APIs can return different CJK families when queried one
+        // character at a time, even for characters in the same script run.
+        // Reusing a compatible earlier result prevents those per-character
+        // choices from producing visibly mixed Japanese fonts.
+        for key in self.fallback_fonts.clone() {
+            if self.font_supports_char(key, ch) {
+                self.char_to_font.insert(ch, key);
+                return Some(key);
+            }
+        }
+
         // Global cache check: resolve by family name + face index.
         if let Some((family_name, idx)) = GLOBAL_CHAR_FONT.lock().unwrap().get(&ch).cloned() {
             log::debug!(target: "orinium_text::query_any", "U+{:04X} global-cache hit → {family_name} idx={idx}", ch as u32);
-            for face_info in self.db.faces() {
-                if face_info.index == idx
-                    && face_info.families.iter().any(|(n, _)| *n == family_name)
-                {
-                    let key = FontKey(face_info.id);
-                    self.char_to_font.insert(ch, key);
-                    return Some(key);
-                }
+            let cached_id = self
+                .db
+                .faces()
+                .find(|face_info| {
+                    face_info.index == idx
+                        && face_info.families.iter().any(|(n, _)| *n == family_name)
+                })
+                .map(|face_info| face_info.id);
+            if let Some(id) = cached_id {
+                let key = FontKey(id);
+                self.char_to_font.insert(ch, key);
+                self.remember_fallback_font(key);
+                return Some(key);
             }
         }
 
@@ -706,6 +730,7 @@ impl FontSystem {
                 if self.get_or_create_face(key).is_some() {
                     log::debug!(target: "orinium_text::query_any", "U+{:04X} platform fallback succeeded → {family_name} key={key:?}", ch as u32);
                     self.char_to_font.insert(ch, key);
+                    self.remember_fallback_font(key);
                     GLOBAL_CHAR_FONT
                         .lock()
                         .unwrap()
@@ -717,22 +742,14 @@ impl FontSystem {
             log::trace!(target: "orinium_text::query_any", "U+{:04X} platform fallback returned nothing", ch as u32);
         }
 
-        let tried: std::collections::HashSet<fontdb::ID> =
-            self.face_cache.keys().copied().collect();
-
         // Collect IDs first to avoid borrowing self.db and self simultaneously.
-        let untried_ids: Vec<fontdb::ID> = self
-            .db
-            .faces()
-            .map(|info| info.id)
-            .filter(|id| !tried.contains(id))
-            .collect();
+        let candidate_ids: Vec<fontdb::ID> = self.db.faces().map(|info| info.id).collect();
 
         // Prefer Normal-style faces as a last-resort fallback.
         let mut fallback_key: Option<FontKey> = None;
         let mut fallback_family: Option<(String, u32)> = None;
 
-        for &id in &untried_ids {
+        for &id in &candidate_ids {
             let key = FontKey(id);
 
             // Collect face metadata first to avoid borrowing self.db and self
@@ -742,29 +759,7 @@ impl FontSystem {
                 None => continue,
             };
 
-            let has_valid_glyph = {
-                let cache_key = (id, ch);
-                let cached_val = GLOBAL_CHAR_SUPPORT.lock().unwrap().get(&cache_key).copied();
-                if let Some(supported) = cached_val {
-                    supported
-                } else {
-                    let supported = if let Some(data) = self.get_font_data(key) {
-                        if let Ok(ttfp) = rustybuzz::ttf_parser::Face::parse(&data, face_idx) {
-                            ttfp.glyph_index(ch)
-                                .map_or(false, |gid| gid != rustybuzz::ttf_parser::GlyphId(0))
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    GLOBAL_CHAR_SUPPORT
-                        .lock()
-                        .unwrap()
-                        .insert(cache_key, supported);
-                    supported
-                }
-            };
+            let has_valid_glyph = self.font_supports_char(key, ch);
 
             if !has_valid_glyph {
                 continue;
@@ -780,6 +775,7 @@ impl FontSystem {
 
             if style == fontdb::Style::Normal {
                 self.char_to_font.insert(ch, key);
+                self.remember_fallback_font(key);
                 if let Some(ref name) = family {
                     GLOBAL_CHAR_FONT
                         .lock()
@@ -797,6 +793,7 @@ impl FontSystem {
 
         if let Some(key) = fallback_key {
             self.char_to_font.insert(ch, key);
+            self.remember_fallback_font(key);
             if let Some((name, idx)) = fallback_family {
                 GLOBAL_CHAR_FONT.lock().unwrap().insert(ch, (name, idx));
             }
@@ -804,6 +801,36 @@ impl FontSystem {
             log::warn!(target: "orinium_text::query_any", "U+{:04X} ({ch}) — no font found in entire system", ch as u32);
         }
         fallback_key
+    }
+
+    fn remember_fallback_font(&mut self, key: FontKey) {
+        if !self.fallback_fonts.contains(&key) {
+            self.fallback_fonts.push(key);
+        }
+    }
+
+    fn font_supports_char(&mut self, key: FontKey, ch: char) -> bool {
+        let cache_key = (key.0, ch);
+        if let Some(supported) = GLOBAL_CHAR_SUPPORT.lock().unwrap().get(&cache_key).copied() {
+            return supported;
+        }
+
+        let face_index = match self.db.face(key.0) {
+            Some(face) => face.index,
+            None => return false,
+        };
+        let supported = self.get_font_data(key).is_some_and(|data| {
+            rustybuzz::ttf_parser::Face::parse(&data, face_index)
+                .ok()
+                .and_then(|face| face.glyph_index(ch))
+                .is_some_and(|glyph| glyph != rustybuzz::ttf_parser::GlyphId(0))
+        });
+
+        GLOBAL_CHAR_SUPPORT
+            .lock()
+            .unwrap()
+            .insert(cache_key, supported);
+        supported
     }
 
     /// Returns the raw font data for a given key.
@@ -857,6 +884,19 @@ mod tests {
         let b = FontSystem::default();
         assert!(a.db.len() > 0);
         assert_eq!(a.db.len(), b.db.len());
+    }
+
+    #[test]
+    fn fallback_cascade_reuses_a_font_that_covers_the_next_character() {
+        let mut fs = FontSystem::new();
+        let Some(first_font) = fs.query_any_covering('自') else {
+            return;
+        };
+        if !fs.font_supports_char(first_font, '作') {
+            return;
+        }
+
+        assert_eq!(fs.query_any_covering('作'), Some(first_font));
     }
 }
 
