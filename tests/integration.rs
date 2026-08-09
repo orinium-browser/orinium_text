@@ -587,6 +587,26 @@ fn test_japanese_text_does_not_panic() {
     }
 }
 
+#[test]
+fn test_ltr_font_fallback_preserves_cluster_order() {
+    let mut fs = FontSystem::new();
+    let mut layouter = TextLayouter::new();
+    let style = default_style();
+    let text = "自作OSであるmochiOSの開発からOriniumBrowserまで";
+
+    let shaped = layouter.shape_text(&mut fs, text, &style);
+    let clusters: Vec<_> = shaped
+        .fragments
+        .iter()
+        .map(|fragment| fragment.cluster)
+        .collect();
+
+    assert!(
+        clusters.windows(2).all(|pair| pair[0] <= pair[1]),
+        "LTR fallback reordered clusters: {clusters:?}"
+    );
+}
+
 #[cfg(feature = "layout-text")]
 #[test]
 fn test_japanese_layout_text_single_line() {

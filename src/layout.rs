@@ -425,6 +425,30 @@ fn shape_with_fallback(
         }
     }
 
+    // Fallback tasks are processed separately from the ranges already covered
+    // by the current font.  Keep those implementation details from changing
+    // the visual order of the shaped run: LTR ranges advance by increasing
+    // cluster offset, while RTL ranges advance by decreasing cluster offset.
+    result.sort_by(|a, b| {
+        let a_cluster = a
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.cluster)
+            .min()
+            .unwrap_or(0);
+        let b_cluster = b
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.cluster)
+            .min()
+            .unwrap_or(0);
+
+        match direction {
+            Direction::Ltr => a_cluster.cmp(&b_cluster),
+            Direction::Rtl => b_cluster.cmp(&a_cluster),
+        }
+    });
+
     result
 }
 
